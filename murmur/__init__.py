@@ -1,0 +1,1 @@
+"""MurMur desktop assistant."""

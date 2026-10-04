@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-label="MurMur. Your voice, a clearer draft. Windows voice assistant with offline and cloud speech recognition.">
+<defs><linearGradient id="wave" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a7b6ff"/><stop offset="1" stop-color="#65e4cc"/></linearGradient><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101522"/><stop offset="1" stop-color="#1d263d"/></linearGradient></defs>
+<rect width="1200" height="380" rx="24" fill="url(#bg)"/>
+<circle cx="1090" cy="25" r="230" fill="#7f91f4" opacity=".055"/><circle cx="1070" cy="365" r="170" fill="#65e4cc" opacity=".045"/>
+<g transform="translate(64 64)"><rect x="0" y="0" width="112" height="112" rx="30" fill="#171c2c"/><path d="M26 68V44M41 78V34M56 86V26M71 78V34M86 68V44" fill="none" stroke="url(#wave)" stroke-width="8" stroke-linecap="round"/></g>
+<g font-family="Segoe UI,Arial,sans-serif"><text x="206" y="120" font-size="52" font-weight="700" fill="#f2f5ff">MurMur</text><text x="208" y="155" font-size="16" letter-spacing="3" fill="#a7b6ff">VOICE → TEXT → FLOW</text>
+<text x="64" y="238" font-size="38" font-weight="600" fill="#f2f5ff">Your voice, a clearer draft.</text>
+<text x="66" y="278" font-size="19" fill="#b7c1d9">Dictate, translate, and refine text on Windows.</text>
+<text x="66" y="327" font-size="13" letter-spacing="2" fill="#87a0bc">LOCAL SPEECH · CLOUD OPTIONS · PREVIEW &amp; CONTROL</text></g>
+<g transform="translate(837 150)"><rect width="292" height="82" rx="41" fill="#101624" stroke="#394561"/>
+<circle cx="42" cy="41" r="16" fill="#65e4cc" opacity=".12"/><circle cx="42" cy="41" r="5" fill="#65e4cc"/>
+<path d="M79 47V35M96 54V28M113 60V22M130 52V30M147 46V36M164 55V27M181 61V21M198 52V30M215 46V36" stroke="url(#wave)" stroke-width="5" stroke-linecap="round"/>
+<rect x="245" y="34" width="14" height="14" rx="3" fill="#d4ddf1"/></g>
+</svg>

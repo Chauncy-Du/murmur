@@ -1,0 +1,669 @@
+import argparse
+import copy
+import os
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass,field
+from pathlib import Path
+from PySide6.QtCore import QObject,Signal,QTimer,Qt,QEventLoop
+from PySide6.QtWidgets import QApplication,QSystemTrayIcon,QMenu,QMessageBox
+from .storage import Store,credential,credential_lock,PRICE_KEYS
+from .hotkeys import Hotkeys
+from .providers import make_recorder as Recorder,transform,ask,AskResult
+from .local_llm import auto_enabled
+from .ui import Bubble,ResultBubble,Preview,STYLE,icon
+from .dashboard import MainWindow
+from . import windows
+
+@dataclass
+class Session:
+    mode:str
+    cfg:dict
+    target:object
+    id:str=field(default_factory=lambda:uuid.uuid4().hex)
+    cancel:threading.Event=field(default_factory=threading.Event)
+    recorder:object=None
+    raw:str=''
+    phase:str='启动'
+    focus_changed:bool=False
+    stopped:float=0.
+    duration:float=0.
+    instruction:bool=False
+    assistant:bool=False
+    context:object=None
+    input_epoch:int=0
+    gesture:int=0
+    hook_epoch:int=0
+    hook_cancel_epoch:int=0
+    editor_context:str='selection'
+    steps:tuple=()
+    completed_steps:int=0
+
+class Bridge(QObject):
+    message=Signal(str,str,object)
+    model_status=Signal(str,bool)
+    service_checked=Signal(str,str,object)
+    usage_received=Signal(object)
+
+class Controller(QObject):
+    def __init__(self,app,store,listen=True):
+        windows.prepare_text_context()
+        super().__init__();self.app=app;self.store=store;self.session=None;self.pending=False;self.pending_generation=0;self.selection_target=None;self.selection_original='';self.selection_bookmark=None;self.clip_tx=None;self.capture_busy=False;self.capture_generation=0;self.capture_tx=None;self.input_epoch=0
+        self.window=MainWindow(store);self.bubble=Bubble(store.config);self.result_bubble=ResultBubble(store.config);self.preview=Preview(self.window);self.result_context=None
+        self.result_bubble.edit_requested.connect(self.edit_result)
+        self.bridge=Bridge();self.bridge.message.connect(self.receive)
+        self.bridge.usage_received.connect(self.record_usage)
+        self.model_cancel=threading.Event();self.model_busy=False;self.quitting=False;self.service_tests={}
+        self.bridge.model_status.connect(self.model_status)
+        self.bridge.service_checked.connect(self.service_checked)
+        self.window.service_test.connect(self.test_service)
+        self.window.install_offline.connect(self.install_offline)
+        self.window.record.connect(self.toggle);self.window.translate.connect(lambda:self.toggle('翻译'));self.window.ask.connect(self.start_ask);self.window.preview.connect(self.open_preview);self.window.save_settings.connect(self.save_settings)
+        self.window.cancel.connect(self.cancel)
+        self.bubble.toggle.connect(self.toggle);self.bubble.ask.connect(self.start_ask);self.bubble.cancel.connect(self.cancel);self.bubble.open_main.connect(self.show_main)
+        self.preview.submit.connect(self.edit);self.preview.replace.connect(self.replace);self.preview.voice.connect(lambda:self.toggle('指令'));self.preview.cancel.connect(self.cancel)
+        self.keys=Hotkeys(store.config);self.keys.gesture.connect(self.hotkey);self.keys.diagnostic.connect(self.window.key_status.setText);self.keys.physical_input.connect(self.physical_input)
+        if listen:
+            try:self.keys.start()
+            except Exception:
+                try:self.keys.stop()
+                except Exception:pass
+                self.window.key_status.setText('Global input monitoring is unavailable. Results stay in Preview; restart MurMur to retry.')
+        self.tray=QSystemTrayIcon(icon(),self);menu=QMenu();menu.addAction('Open MurMur',self.show_main);menu.addAction('Start / stop dictation',self.toggle);menu.addAction('Cancel',self.cancel);menu.addSeparator();menu.addAction('Quit MurMur',self.quit);self.tray.setContextMenu(menu);self.tray.activated.connect(lambda reason:self.show_main() if reason==QSystemTrayIcon.DoubleClick else None);self.tray.show()
+        self.monitor=QTimer(self);self.monitor.timeout.connect(self.check_focus);self.monitor.start(75)
+        self.bubble.position();self.bubble.state('待机',self.shortcut_hint(),store.config['demo'])
+        self.sync_controls()
+        try:print(f'[MurMur] Cumulative local LLM tokens: {self.store.usage_totals()["local_tokens"]}',flush=True)
+        except (OSError,AttributeError):pass
+    def shortcut_hint(self):
+        names={'right_alt':'Right Alt','f8':'F8','f9':'F9','disabled':'Capsule'}
+        hint=names.get(self.store.config['dictation_key'],'Right Alt')+' · '+('press to start / stop' if self.store.config['trigger']=='toggle' else 'hold to speak')
+        ask_key=self.store.config.get('ask_key','right_alt+space')
+        if ask_key!='disabled':hint+=' · Ask: '+('Right Alt + Space' if ask_key=='right_alt+space' else 'Ctrl + Shift + A')
+        return hint
+    def sync_controls(self):
+        phase=self.session.phase if self.session else None
+        mode=self.session.mode if self.session else None
+        self.bubble.set_session_kind('Ask Anything' if self.session and self.session.assistant else '')
+        self.window.set_session_state(phase,mode)
+        self.preview.set_session_state(phase,mode)
+    @staticmethod
+    def processing_step(mode):
+        return {'听写':'Polish','翻译':'Translate','润色':'Refine','总结':'Summarize','扩写':'Expand','自定义':'Edit','随便问':'Respond'}.get(mode,'Edit')
+    def configure_progress(self,s,voice=True):
+        if not voice:s.steps=(self.processing_step(s.mode),)
+        elif s.instruction or (s.mode=='听写' and not s.cfg['polish']):s.steps=('Transcribe',)
+        else:s.steps=('Transcribe','Respond' if s.assistant else self.processing_step(s.mode))
+        s.completed_steps=0
+    def update_progress(self,s,complete=False):
+        if self.session is not s or s.cancel.is_set() or self.quitting:return
+        if not s.steps:self.configure_progress(s)
+        if complete:s.completed_steps=len(s.steps)
+        step=s.steps[min(s.completed_steps,len(s.steps)-1)]
+        self.bubble.set_progress(step,s.completed_steps,len(s.steps))
+    def show_main(self):self.window.show();self.window.raise_();self.window.activateWindow()
+    def record_usage(self,usage):
+        try:
+            recorded=self.store.record_usage(usage);self.window.refresh_token_insights()
+            if recorded and usage.get('local') is True:
+                import json
+                counts=lambda name:'unknown' if usage.get(name) is None else str(usage[name])
+                model=json.dumps(str(usage.get('model','')),ensure_ascii=True)
+                total=self.store.usage_totals()['local_tokens']
+                try:print(f'[MurMur] Local LLM {model} | input={counts("input_tokens")} output={counts("output_tokens")} total={counts("total_tokens")} | cumulative local tokens={total}',flush=True)
+                except (OSError,AttributeError):pass
+        except Exception:
+            self.window.settings_status.setText('Usage could not be saved. Your text is preserved.')
+    def edit_result(self,text):
+        if self.session:return
+        raw=self.result_context[0] if self.result_context else text
+        assistant=bool(self.result_context and len(self.result_context)>2)
+        if assistant and self.result_context[2]:raw='Voice request:\n'+raw+'\n\nSelected source:\n'+self.result_context[2]
+        self.result_bubble.hide();self.preview.show_text(raw,text,'Edit your result, then copy the revised text.',False,assistant=assistant,result_edit=True)
+    @staticmethod
+    def service_snapshot(kind,cfg,secrets):
+        import hashlib,json
+        keys=('asr_backend','asr_model','asr_url','vocabulary_id','offline_engine','offline_model_dir','offline_language','offline_threads','offline_acceleration','ali_nls_url') if kind=='asr' else ('llm_url','llm_model','ollama','ollama_auto',*PRICE_KEYS)
+        if kind=='ask':keys=('ask_llm_url','ask_llm_model')
+        names=('asr','ali_appkey','ali_token') if kind=='asr' else ('ask_llm',) if kind=='ask' else ('llm',)
+        # Only a digest is retained for stale-result checks. Keys remain in the
+        # worker's in-memory input and never enter diagnostics or storage.
+        payload=[{key:cfg.get(key) for key in keys},{name:secrets.get(name,'') for name in names}]
+        return hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=True).encode()).hexdigest()
+    def test_service(self,kind,cfg,secrets):
+        if self.quitting or kind not in ('asr','llm','ask') or kind in self.service_tests:return
+        if self.session:
+            self.window.set_service_test_state(kind,False,'Finish the current recording first.','',False);return
+        ident=uuid.uuid4().hex;cancel=threading.Event();cfg=copy.deepcopy(cfg);secrets=dict(secrets)
+        self.service_tests[kind]=(ident,cancel,self.service_snapshot(kind,cfg,secrets))
+        self.window.set_service_test_state(kind,True)
+        def work():
+            try:
+                from .service_checks import check_service
+                result=check_service(kind,cfg,secrets,cancel,usage_sink=self.bridge.usage_received.emit)
+            except InterruptedError:
+                result={'success':False,'summary':'Cancelled','detail':'Connection check cancelled.'}
+            except Exception:
+                result={'success':False,'summary':'Connection check failed.','detail':'Try again. No microphone audio was recorded.'}
+            self.bridge.service_checked.emit(kind,ident,result)
+        threading.Thread(target=work,name='MurMur-service-check-'+kind,daemon=True).start()
+    def service_checked(self,kind,ident,result):
+        active=self.service_tests.get(kind)
+        if self.quitting or not active or active[0]!=ident:return
+        self.service_tests.pop(kind)
+        cfg,secrets=self.window.service_test_values()
+        if self.service_snapshot(kind,cfg,secrets)!=active[2]:
+            self.window.set_service_test_state(kind,False,'Settings changed. Test again.','The check used earlier values; this configuration has not been verified.',None);return
+        self.window.set_service_model_metadata(kind,result)
+        self.window.set_service_test_state(kind,False,result['summary'],result.get('detail',''),bool(result['success']))
+    def model_status(self,text,finished):
+        if self.quitting:return
+        if finished:
+            self.model_busy=False
+            self.window.set_offline_download_state(False)
+        self.window.offline_status.setText(text)
+    def install_offline(self):
+        if self.model_busy or self.quitting:return
+        engine=self.window.fields['offline_engine'].currentData()
+        acceleration=self.window.fields['offline_acceleration'].currentData()
+        folder=self.window.fields['offline_model_dir'].text().strip()
+        if not folder:self.window.offline_status.setText('Choose a model folder first.');return
+        self.model_busy=True;self.model_cancel.clear();self.window.set_offline_download_state(True)
+        def work():
+            try:
+                from .models import install_model
+                if acceleration=='cpu':
+                    install_model(engine,folder,lambda text:self.bridge.model_status.emit(text,False),self.model_cancel)
+                else:
+                    install_model(engine,folder,lambda text:self.bridge.model_status.emit(text,False),self.model_cancel,acceleration=acceleration)
+                self.bridge.model_status.emit('Model files downloaded and verified. Save changes to use this folder.',True)
+            except InterruptedError:self.bridge.model_status.emit('Download cancelled.',True)
+            except Exception:self.bridge.model_status.emit('Download failed. Check your connection and try again.',True)
+        threading.Thread(target=work,name='MurMur-model-download',daemon=True).start()
+    def check_focus(self):
+        if self.session and self.session.target and (not self.keys.monitoring or not windows.valid(self.session.target)):self.session.focus_changed=True
+        if self.session and self.session.phase=='录音' and self.session.recorder:
+            s=self.session;elapsed=max(0,time.monotonic()-s.recorder.started)
+            self.bubble.state('录音',f'{int(elapsed)//60:02d}:{int(elapsed)%60:02d} · '+('Demo recording' if s.cfg['demo'] else 'Listening'),s.cfg['demo'])
+            if s.recorder.error:self.receive(s.id,'error',s.recorder.error)
+    def hotkey(self,event,gesture=0):
+        if event=='pending':
+            self.pending=True;self.pending_generation+=1;generation=self.pending_generation
+            self.pending_gesture=gesture
+            self.pending_allowed=self.store.config['dictation_key']!='disabled' and (not gesture or self.store.config['dictation_key']=='right_alt')
+            # Wait for release before stopping an existing session: Space may
+            # still turn this Right Alt press into an Ask gesture.
+            if not self.session and self.pending_allowed:QTimer.singleShot(130,lambda:self.begin_pending(generation))
+        elif event=='release':
+            if self.pending:
+                self.pending=False;self.pending_generation+=1
+                if self.session and self.session.assistant:self.stop()
+                elif self.pending_allowed and self.store.config['trigger']=='toggle':self.toggle()
+            elif self.store.config['trigger']=='hold' and self.session and not self.session.assistant and self.session.phase in ('启动','录音'):self.stop()
+        elif event=='ask':
+            self.pending=False;self.pending_generation+=1
+            self.start_ask(gesture)
+        elif event=='ask_release':return
+        elif event=='translation':
+            self.pending=False
+            if self.session and self.session.mode=='听写':self.cancel()
+            self.toggle('翻译')
+        elif event=='selection':
+            self.pending=False;self.cancel();generation=self.capture_generation;QTimer.singleShot(180,lambda:self.capture_selection() if generation==self.capture_generation else None)
+        elif event in ('cancel','altgr'):self.pending=False;self.cancel()
+    def begin_pending(self,generation=None):
+        if self.pending and (generation is None or generation==self.pending_generation):
+            self.pending=False
+            if getattr(self,'pending_allowed',False):
+                self.toggle()
+                if self.session:self.session.gesture=getattr(self,'pending_gesture',0)
+    def start_ask(self,gesture=0):
+        if self.capture_busy:return
+        s=self.session
+        if s and s.assistant:
+            if s.phase in ('启动','录音'):self.stop()
+            return
+        if s and (s.mode!='听写' or s.phase not in ('启动','录音')):return
+        if 'ask' in self.service_tests or 'asr' in self.service_tests:
+            self.window.home_status.setText('Finish the speech or Ask Anything connection check before recording.');return
+        cfg=copy.deepcopy(self.store.config)
+        if not cfg['demo']:
+            try:
+                from .assistant import ask_config
+                ask_config(cfg)
+                try:key_present=bool(credential('ask_llm'))
+                except Exception:raise RuntimeError('Ask Anything credentials could not be read. Check Settings → Services.') from None
+                if not key_present:raise RuntimeError('Set a separate Ask Anything API key in Settings → Services, then save.')
+            except Exception as exc:
+                if s:self.cancel()
+                self.result_context=('', '', '', 'answer')
+                self.result_bubble.show_error(str(exc),status='Ask Anything · Setup required',source=self.bubble)
+                return
+        if s:
+            if gesture and s.gesture==gesture:
+                guard=self.keys.input_guard
+                s.assistant=True;s.mode='随便问';s.context=windows.text_context(s.target);s.input_epoch=self.input_epoch
+                s.hook_epoch,s.hook_cancel_epoch=guard
+                s.focus_changed=s.focus_changed or guard!=self.keys.input_guard
+                self.configure_progress(s)
+                self.sync_controls();return
+            self.cancel()
+        self.toggle('随便问')
+    def toggle(self,mode='听写'):
+        if self.capture_busy:return
+        if self.session:
+            if self.session.phase in ('启动','录音'):self.stop()
+            return
+        if 'asr' in self.service_tests:
+            self.window.home_status.setText('Finish the speech recognition check before recording.')
+            self.bubble.state('待机','Speech check running…',self.store.config['demo']);return
+        guard=self.keys.input_guard
+        t=windows.target();t=None if windows.own_target(t) else t
+        self.result_bubble.hide()
+        assistant=mode=='随便问'
+        context=windows.text_context(t) if assistant else None
+        s=Session(mode,copy.deepcopy(self.store.config),t,instruction=mode=='指令',assistant=assistant,context=context,input_epoch=self.input_epoch);self.session=s
+        s.hook_epoch,s.hook_cancel_epoch=guard
+        self.configure_progress(s)
+        if assistant:s.focus_changed=guard!=self.keys.input_guard
+        self.sync_controls()
+        self.bubble.state('启动','Connecting…' if not s.cfg['demo'] else 'Starting demo recording',s.cfg['demo'])
+        def work():
+            try:
+                rec=Recorder(s.cfg,lambda text:self.bridge.message.emit(s.id,'partial',text),lambda level:self.bridge.message.emit(s.id,'level',level),s.cancel);s.recorder=rec;rec.start()
+                if s.cancel.is_set():rec.abort();return
+                self.bridge.message.emit(s.id,'started',None)
+            except Exception as e:
+                if s.recorder:s.recorder.abort()
+                self.bridge.message.emit(s.id,'error',str(e))
+        threading.Thread(target=work,daemon=True).start()
+    def stop(self):
+        s=self.session
+        if not s or s.phase not in ('启动','录音'):return
+        if s.phase=='启动':s.phase='等待停止';self.bubble.state('等待停止','Finishing startup',s.cfg['demo']);self.sync_controls();return
+        s.phase='识别';s.stopped=time.monotonic();self.bubble.state('识别','Finishing transcription',s.cfg['demo'])
+        self.update_progress(s)
+        self.sync_controls()
+        def work():
+            try:
+                raw=s.recorder.stop();s.duration=s.recorder.duration;s.raw=raw
+                if s.cancel.is_set():return
+                if not isinstance(raw,str) or not raw.strip():raise RuntimeError('No speech was recognized. Try recording again.')
+                self.bridge.message.emit(s.id,'recognized',raw)
+                if s.assistant:
+                    self.bridge.message.emit(s.id,'phase','整理')
+                    final=ask(raw,s.context.text if s.context else '',s.cfg,cancel=s.cancel,usage_sink=self.bridge.usage_received.emit)
+                elif s.instruction:final=raw
+                else:
+                    if s.cfg['polish'] or s.mode!='听写':self.bridge.message.emit(s.id,'phase','整理')
+                    final=transform(raw,s.mode,s.cfg,cancel=s.cancel,usage_sink=self.bridge.usage_received.emit)
+                self.bridge.message.emit(s.id,'result',final)
+            except InterruptedError:pass
+            except Exception as e:self.bridge.message.emit(s.id,'error',str(e))
+        threading.Thread(target=work,daemon=True).start()
+    def receive(self,ident,event,payload):
+        s=self.session
+        if not s or s.id!=ident or (s.cancel.is_set() and event!='error'):return
+        if s.assistant and self.keys.cancel_generation!=s.hook_cancel_epoch:
+            self.cancel();return
+        if event=='started':
+            if s.phase not in ('启动','等待停止'):return
+            wait=s.phase=='等待停止';s.phase='录音'
+            if wait:self.stop()
+            else:
+                self.bubble.state('录音','Right Alt to finish Ask Anything' if s.assistant else 'Release to finish' if s.cfg['trigger']=='hold' else 'Click again to finish',s.cfg['demo']);self.sync_controls()
+        elif event=='partial':s.raw=payload
+        elif event=='level' and s.phase in ('启动','录音','等待停止'):
+            self.bubble.wave.feed_level(payload)
+        elif event=='recognized':
+            s.raw=payload
+            if isinstance(payload,str) and payload.strip():
+                if not s.steps:self.configure_progress(s)
+                s.completed_steps=max(s.completed_steps,min(1,len(s.steps)-1))
+                self.update_progress(s)
+        elif event=='phase':
+            s.phase=payload;self.sync_controls()
+            self.bubble.state(payload,self.processing_step(s.mode),s.cfg['demo']);self.update_progress(s)
+        elif event in ('result','error'):self.finish(s,payload,event=='error')
+    def _save_history(self,*args,**kwargs):
+        import sqlite3
+        try:
+            self.store.add(*args,**kwargs)
+            return True
+        except (sqlite3.Error,OSError):
+            db=getattr(self.store,'db',None)
+            if db is not None:
+                try:db.rollback()
+                except (sqlite3.Error,OSError):pass
+            self.window.settings_status.setText('History could not be saved. Your text is still available.')
+            return False
+    def finish(self,s,payload,error=False):
+        if s.assistant:
+            self.finish_ask(s,payload,error);return
+        if not error and (not isinstance(payload,str) or not payload.strip()):
+            payload='The model returned an empty or invalid result. Your original text is preserved.';error=True
+        if not error:self.update_progress(s,complete=True)
+        if s.recorder:
+            if error:s.recorder.abort()
+            s.duration=s.recorder.duration
+        # Abort freezes any last partial sentence into recorder.raw. Read it
+        # afterwards so a device/network failure cannot hide that original.
+        raw=(s.recorder.raw if error and s.recorder else '') or s.raw or (s.recorder.raw if s.recorder else '')
+        final=raw if error else payload
+        latency=max(0,time.monotonic()-(s.stopped or time.monotonic()))
+        audio=''
+        if s.recorder and s.cfg['save_audio']:
+            try:audio=s.recorder.save_audio(self.store.root/'audio'/f'{s.id}.wav')
+            except Exception:payload=str(payload)+'; audio could not be saved'
+        history_saved=self._save_history(s.id,s.mode,raw,final,s.duration,latency,s.cfg['demo'],payload if error else '',audio)
+        history_warning='' if history_saved else ' · History could not be saved'
+        editor_flags={'assistant':s.editor_context=='assistant','result_edit':s.editor_context=='result' or s.mode in ('听写','翻译')}
+        self.session=None
+        if history_saved:self.window.refresh()
+        self.sync_controls()
+        if s.instruction and not error:
+            self.preview.command.setText(final);self.preview.show()
+            if not history_saved:self.preview.notice.setText('History could not be saved. Your instruction is ready to submit.')
+            self.bubble.state('完成','Instruction ready to submit'+history_warning,s.cfg['demo']);return
+        if error:
+            if s.recorder:s.recorder.abort()
+            message='Processing failed: '+str(payload)+history_warning
+            # A background failure must not activate the editor over the
+            # original input target. Recovered text is copied only on request.
+            self.preview.show_text(raw,final,message,False,show=False,**editor_flags)
+            if s.mode in ('听写','翻译') or not self.preview.isVisible():
+                self.result_context=(raw,raw)
+                self.result_bubble.show_error(str(payload)+history_warning,raw,demo=s.cfg['demo'],status='Processing failed',source=self.bubble)
+            self.bubble.state('失败',('Original text preserved' if raw.strip() else 'No transcript captured')+history_warning,s.cfg['demo']);return
+        dictation=s.mode in ('听写','翻译')
+        copied=False
+        if dictation and not s.cfg['demo'] and final.strip():
+            try:
+                self.app.clipboard().setText(str(final))
+                copied=self.app.clipboard().text()==str(final)
+            except Exception:pass
+        if s.mode in ('听写','翻译') and not s.cfg['demo'] and self.keys.monitoring and not s.focus_changed and windows.valid(s.target):
+            try:
+                self.paste(final,s.target)
+                self.result_context=(raw,str(final));self.preview.show_text(raw,str(final),'Paste sent. Review or copy your result.'+history_warning,False,show=False,result_edit=True)
+                self.result_bubble.show_result(str(final),status=('Copied · Paste sent' if copied else 'Paste sent')+history_warning,source=self.bubble)
+                self.bubble.state('完成','Paste sent · saved in History' if history_saved else 'Paste sent'+history_warning,False);return
+            except Exception as e:notice=str(e)
+        elif s.cfg['demo']:notice='Demo result · preview only'
+        elif s.mode in ('听写','翻译'):
+            notice='Input monitoring is unavailable. Copy your result from Preview.' if not self.keys.monitoring else 'The target changed or could not be confirmed. Your result is preserved.'
+        else:notice='Preview ready. Replacement requires checking the original selection.'
+        notice+=history_warning
+        replacement=bool(s.editor_context=='selection' and self.selection_target and self.selection_bookmark and not s.cfg['demo'] and s.mode not in ('听写','翻译'))
+        if dictation:
+            self.result_context=(raw,str(final))
+            self.preview.show_text(raw,str(final),notice,False,show=False,result_edit=True)
+            self.result_bubble.show_result(str(final),demo=s.cfg['demo'],status=('Copied' if copied else 'Result ready · Copy to use')+history_warning,source=self.bubble)
+        else:self.preview.show_text(raw,final,notice,replacement,**editor_flags)
+        self.bubble.state('完成','Result ready'+history_warning,s.cfg['demo'])
+    def finish_ask(self,s,payload,error=False):
+        if s.recorder:
+            if error:s.recorder.abort()
+            s.duration=s.recorder.duration
+        raw=(s.recorder.raw if error and s.recorder else '') or s.raw
+        context=s.context.text if s.context else ''
+        if not error and (not isinstance(payload,AskResult) or payload.action not in ('replace','insert','answer') or not isinstance(payload.text,str) or not payload.text.strip()):
+            payload='The assistant returned an invalid action. Your spoken request is preserved.';error=True
+        if not error:self.update_progress(s,complete=True)
+        action='answer' if error else payload.action
+        final=raw if error else payload.text
+        mode='随便问' if error else {'replace':'语音编辑','insert':'起草','answer':'问答'}[action]
+        latency=max(0,time.monotonic()-(s.stopped or time.monotonic()))
+        audio=''
+        if s.recorder and s.cfg['save_audio']:
+            try:audio=s.recorder.save_audio(self.store.root/'audio'/f'{s.id}.wav')
+            except Exception:pass
+        history_saved=self._save_history(s.id,mode,raw,final,s.duration,latency,s.cfg['demo'],str(payload) if error else '',audio,context=context)
+        # Retain the session until the final target check and paste complete.
+        notice='Answer ready'
+        if error:notice='Request failed · spoken request preserved'
+        elif s.cfg['demo']:notice='Copy to use'
+        elif action!='answer':
+            expected='selection' if action=='replace' else 'caret'
+            eligible=bool(s.context and s.context.state==expected and self.ask_write_guard(s))
+            if eligible:
+                try:
+                    self.paste(final,s.target,context=s.context,guard=lambda:self.ask_write_guard(s))
+                    notice='Replacement paste sent' if action=='replace' else 'Draft paste sent'
+                except Exception as exc:notice=str(exc)
+            else:notice='Target or selection could not be confirmed · Copy to use'
+        if not history_saved:notice+=' · History could not be saved'
+        self.session=None
+        if history_saved:self.window.refresh()
+        self.sync_controls()
+        self.result_context=(raw,final,context,action)
+        display=final or (str(payload) if error else '')
+        summary='Ask Anything · Request failed' if error else 'Ask Anything · Preview only' if action!='answer' and notice not in ('Replacement paste sent','Draft paste sent') else 'Ask Anything · '+notice
+        if not history_saved:summary='Ask Anything · History not saved'
+        if error:
+            self.result_bubble.show_error(str(payload)+(' · History could not be saved' if not history_saved else ''),raw,demo=s.cfg['demo'],status='Ask Anything · '+notice,status_summary=summary,source=self.bubble)
+        else:
+            self.result_bubble.show_result(display,demo=s.cfg['demo'],status='Ask Anything · '+notice,status_summary=summary,source=self.bubble)
+        self.bubble.state('失败' if error else '完成',str(payload) if error else notice,s.cfg['demo'])
+    def ask_write_guard(self,s):
+        return bool(self.session is s and self.keys.monitoring and not s.focus_changed and s.input_epoch==self.input_epoch and not s.cancel.is_set() and self.keys.input_guard==(s.hook_epoch,s.hook_cancel_epoch))
+    def paste(self,text,t,selection=None,context=None,guard=None):
+        if self.clip_tx:raise RuntimeError('Clipboard operation in progress. Try again shortly.')
+        if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
+        if not text.strip() or not windows.valid(t):raise RuntimeError('The target changed. Your result is preserved.')
+        if selection and not windows.selection_matches(t,selection):raise RuntimeError('The original selection changed. Copy the result instead.')
+        if context and not windows.context_matches(t,context):raise RuntimeError('The original selection or cursor changed. Copy the result instead.')
+        tx=windows.ClipboardTransaction();tx.write(text)
+        try:
+            if not windows.valid(t):raise RuntimeError('The target changed.')
+            if selection and not windows.selection_matches(t,selection):raise RuntimeError('The original selection changed. Copy the result instead.')
+            if context and not windows.context_matches(t,context):raise RuntimeError('The original selection or cursor changed. Copy the result instead.')
+            if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
+            windows.chord('V')
+        except Exception:self.restore_clipboard(tx);raise
+        self.clip_tx=tx
+        QTimer.singleShot(650,lambda:self.restore_clipboard(tx))
+    def restore_clipboard(self,tx,expected=None,attempt=0):
+        try:tx.restore(expected)
+        except windows.ClipboardBusy:
+            if not self.quitting and attempt<3:
+                if self.clip_tx is None:self.clip_tx=tx
+                QTimer.singleShot(120,lambda:self.restore_clipboard(tx,expected,attempt+1));return
+            self.bubble.state('失败','Clipboard restoration failed. Copy your result manually.',self.store.config['demo'])
+        except Exception:
+            self.bubble.state('失败','Clipboard restoration failed. Copy your result manually.',self.store.config['demo'])
+        if self.clip_tx is tx:self.clip_tx=None
+    def physical_input(self,kind):
+        self.input_epoch+=1
+        if self.session:self.session.focus_changed=True
+
+    def cancel(self):
+        self.pending=False;self.pending_generation+=1;self.capture_generation+=1;self.capture_busy=False
+        self.result_bubble.hide()
+        if self.capture_tx:self.restore_clipboard(self.capture_tx);self.capture_tx=None
+        s=self.session;history_saved=True;raw=''
+        if s:
+            s.cancel.set()
+            if s.recorder:s.recorder.abort();s.duration=s.recorder.duration
+            raw=(s.recorder.raw if s.recorder else '') or s.raw
+            if raw:history_saved=self._save_history(s.id,s.mode,raw,raw,s.duration,0,s.cfg['demo'],'Cancelled by user',context=s.context.text if s.assistant and s.context else '')
+        self.session=None
+        if s and raw and history_saved:self.window.refresh()
+        self.sync_controls()
+        if not history_saved:
+            message='Cancelled. History could not be saved; copy your text to keep it.'
+            assistant=bool(s and s.assistant)
+            context=s.context.text if assistant and s.context else ''
+            self.result_context=(raw,raw,context,'answer') if assistant else (raw,raw)
+            self.preview.show_text(raw,raw,message,False,show=False,assistant=assistant,result_edit=True)
+            self.result_bubble.show_error(message,raw,demo=s.cfg['demo'],status='Cancelled · History not saved',source=self.bubble)
+        self.bubble.state('待机',('Cancelled' if history_saved else 'Cancelled · History could not be saved') if s else self.shortcut_hint(),self.store.config['demo'])
+    def open_preview(self):
+        self.selection_target=None;self.selection_original='';self.selection_bookmark=None;self.preview.show_text('','','Enter text or press Alt+Space to capture a selection.',False)
+    def capture_selection(self,replace_text=None):
+        if self.capture_busy:return
+        if self.clip_tx:
+            self.preview.notice.setText('Clipboard operation in progress. Try again shortly.');self.preview.show();return
+        t=self.selection_target if replace_text is not None else windows.target()
+        if windows.own_target(t):self.open_preview();self.preview.notice.setText('No external selection could be confirmed. Paste your text here.');return
+        if replace_text is not None and not windows.activate(t):self.preview.notice.setText('Could not restore the original target. Copy the result instead.');return
+        bookmark=windows.selection_bookmark(t) if replace_text is None else self.selection_bookmark
+        if replace_text is not None and (not bookmark or not windows.selection_matches(t,bookmark)):
+            self.preview.notice.setText('The original selection position could not be confirmed. Copy the result instead.');self.preview.show();return
+        try:
+            tx=windows.ClipboardTransaction();tx.write('');windows.chord('C')
+        except Exception as e:
+            if 'tx' in locals():self.restore_clipboard(tx)
+            self.preview.notice.setText(str(e));self.preview.show();return
+        self.capture_generation+=1;generation=self.capture_generation;epoch=self.input_epoch
+        self.capture_busy=True;self.capture_tx=tx
+        import win32clipboard
+        def release(expected=None):
+            self.restore_clipboard(tx,expected)
+            if self.capture_tx is tx:self.capture_tx=None;self.capture_busy=False
+        def read(attempt=0):
+            if generation!=self.capture_generation:release();return
+            current=win32clipboard.GetClipboardSequenceNumber()
+            if epoch!=self.input_epoch or not windows.window_valid(t):
+                release();self.preview.show();self.preview.notice.setText('The target or selection changed during copy. Try again.');return
+            if current==tx.sequence and attempt<10:QTimer.singleShot(50,lambda:read(attempt+1));return
+            try:copied=tx.copied(t)
+            except windows.ClipboardBusy:
+                if attempt<10:QTimer.singleShot(50,lambda:read(attempt+1));return
+                release();self.preview.notice.setText('The clipboard is busy. Your selection was not changed; try again.');self.preview.show();return
+            except Exception:
+                release();self.preview.notice.setText('The clipboard could not be read safely. Try again.');self.preview.show();return
+            text=copied[1] if copied else ''
+            position_confirmed=bool(bookmark and windows.selection_matches(t,bookmark))
+            # Only restore a copied value proven to belong to the captured target.
+            # An unrelated clipboard update always remains untouched.
+            release(copied[0] if copied else None)
+            if replace_text is not None:
+                if text and text==self.selection_original and position_confirmed and windows.valid(t):
+                    try:self.paste(replace_text,t,bookmark);self.preview.notice.setText('Replacement paste sent.')
+                    except Exception as e:self.preview.notice.setText(str(e));self.preview.show()
+                else:self.preview.notice.setText('The original selection could not be confirmed. Copy the result instead.');self.preview.show()
+            else:
+                self.selection_target=t if text else None;self.selection_original=text;self.selection_bookmark=bookmark if position_confirmed else None
+                notice=('Selection captured. Choose an action to preview.' if position_confirmed else 'Selection captured. Copy only: its original position could not be confirmed.') if text else 'No text selection detected. Paste or enter text.'
+                self.preview.show_text(text,'',notice,bool(text) and not self.store.config['demo'] and position_confirmed and bool(t.uia_id and t.editable))
+        QTimer.singleShot(80,read)
+    def replace(self,text):
+        if not self.store.config['demo'] and text.strip():self.capture_selection(text)
+    def edit(self,raw,mode,instruction):
+        if self.session or not raw.strip():self.preview.notice.setText('Enter text and wait for the current operation to finish.');return
+        if mode=='自定义' and not instruction.strip():self.preview.notice.setText('Enter an editing instruction.');return
+        s=Session(mode,copy.deepcopy(self.store.config),None,raw=raw,phase='整理',stopped=time.monotonic(),editor_context=self.preview.editor_context);self.session=s;self.sync_controls();self.bubble.state('整理','Preparing preview',s.cfg['demo'])
+        self.configure_progress(s,voice=False);self.update_progress(s)
+        def work():
+            try:self.bridge.message.emit(s.id,'result',transform(raw,mode,s.cfg,instruction,s.cancel,usage_sink=self.bridge.usage_received.emit))
+            except InterruptedError:pass
+            except Exception as e:self.bridge.message.emit(s.id,'error',str(e))
+        threading.Thread(target=work,daemon=True).start()
+    def save_settings(self,values,secrets):
+        if self.session:QMessageBox.warning(self.window,'MurMur','Finish the current session before saving settings.');return
+        if self.service_tests:
+            self.window.settings_status.setText('Wait for the connection check to finish before saving.');return
+        from urllib.parse import urlparse
+        try:
+            import math
+            for key in PRICE_KEYS:
+                price=values.get(key)
+                if price is None or price=='':values[key]=None;continue
+                if isinstance(price,bool):raise ValueError('Token prices must be non-negative USD per million tokens.')
+                price=float(price)
+                if not math.isfinite(price) or not 0<=price<=1000000:raise ValueError('Token prices must be non-negative USD per million tokens.')
+                values[key]=price
+            if values['translation_key']==values['selection_key']!='disabled':raise ValueError('Translation and selection shortcuts must be different.')
+            endpoint=values.get('ali_nls_url','') if values.get('asr_backend')=='ali_nls' else values['asr_url']
+            if values.get('asr_backend')!='offline' and urlparse(endpoint).scheme!='wss':raise ValueError('ASR URL must use wss://.')
+            if urlparse(values['llm_url']).scheme not in ('http','https'):raise ValueError('LLM URL must use http:// or https://.')
+            from .assistant import ask_config
+            ask_config(values)
+            if not values['asr_model'] or (not values['llm_model'] and not auto_enabled(values)):raise ValueError('Model names cannot be empty.')
+            with credential_lock:
+                for name,key in secrets.items():
+                    if key:
+                        credential(name,key)
+                        if name=='ali_token':credential('ali_token_expiry','')
+            if values['startup']!=self.store.config['startup']:windows.startup(values['startup'])
+            self.store.config.update(values);self.store.save();self.store.prune();self.keys.machine.cfg=self.store.config;self.bubble.cfg=self.store.config;self.bubble.position();self.result_bubble.cfg=self.store.config;self.result_bubble.position();self.window.refresh()
+            for field in ('asr_key','llm_key','ask_llm_key','ali_appkey','ali_token'):
+                widget=getattr(self.window,field,None)
+                if widget is not None:
+                    previous=widget.blockSignals(True)
+                    try:widget.clear()
+                    finally:widget.blockSignals(previous)
+            self.bubble.state('待机','Changes saved',values['demo']);self.window.settings_status.setText('Changes saved')
+        except Exception as e:QMessageBox.warning(self.window,'Could not save settings',str(e))
+    def quit(self):
+        self.quitting=True;self.model_cancel.set()
+        for _,cancel,_ in self.service_tests.values():cancel.set()
+        self.service_tests.clear();self.cancel();self.keys.stop()
+        if self.clip_tx:self.restore_clipboard(self.clip_tx)
+        self.tray.hide();self.bubble.hide();self.result_bubble.hide();self.app.quit()
+
+def main():
+    import multiprocessing
+    multiprocessing.freeze_support()
+    from .storage import OFFLINE_MODEL_DIR_NAMES
+    parser=argparse.ArgumentParser();parser.add_argument('--tray',action='store_true');parser.add_argument('--no-hotkeys',action='store_true');parser.add_argument('--data-dir');parser.add_argument('--screenshots');parser.add_argument('--transcribe-wav');parser.add_argument('--output-file');parser.add_argument('--offline-model-dir');parser.add_argument('--offline-engine',choices=tuple(OFFLINE_MODEL_DIR_NAMES));parser.add_argument('--offline-acceleration',choices=('cpu','gpu'));args=parser.parse_args()
+    if args.transcribe_wav:
+        if not args.output_file:parser.error('--transcribe-wav requires --output-file')
+        import wave
+        from .offline import transcribe_pcm
+        cli_store=Store(args.data_dir);cfg=cli_store.config.copy()
+        selected_engine=args.offline_engine or cfg.get('offline_engine','sensevoice')
+        selected_acceleration=args.offline_acceleration or cfg.get('offline_acceleration','cpu')
+        if selected_engine=='paraformer':selected_acceleration='cpu'
+        changed=(selected_engine,selected_acceleration)!=(cfg.get('offline_engine','sensevoice'),cfg.get('offline_acceleration','cpu'))
+        if changed and not args.offline_model_dir:
+            from .storage import default_offline_model_dir
+            cfg['offline_model_dir']=str(default_offline_model_dir(engine=selected_engine,acceleration=selected_acceleration))
+        cfg.update(offline_engine=selected_engine,offline_acceleration=selected_acceleration)
+        if args.offline_model_dir:cfg['offline_model_dir']=args.offline_model_dir
+        cli_store.db.close()
+        with wave.open(args.transcribe_wav,'rb') as audio:
+            if audio.getnchannels()!=1 or audio.getframerate()!=16000 or audio.getsampwidth()!=2:raise ValueError('Use a mono 16 kHz, 16-bit PCM WAV file.')
+            pcm=audio.readframes(audio.getnframes())
+        result=transcribe_pcm(pcm,cfg)
+        Path(args.output_file).write_text(result,'utf-8');return 0
+    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('MurMur');app.setQuitOnLastWindowClosed(False);app.setStyleSheet(STYLE)
+    from PySide6.QtGui import QPalette,QColor
+    palette=QPalette()
+    for role,color in [(QPalette.Window,'#202022'),(QPalette.WindowText,'#ececf0'),(QPalette.Base,'#29292d'),(QPalette.Text,'#ececf0'),(QPalette.Button,'#333337'),(QPalette.ButtonText,'#ececf0'),(QPalette.Highlight,'#aaa0e1'),(QPalette.HighlightedText,'#202022')]:palette.setColor(role,QColor(color))
+    app.setPalette(palette)
+    from PySide6.QtNetwork import QLocalServer,QLocalSocket
+    lock=None
+    if not args.data_dir:
+        sock=QLocalSocket();sock.connectToServer('MurMur-desktop-v1')
+        if sock.waitForConnected(300):sock.write(b'show');sock.flush();sock.waitForBytesWritten(300);return
+        lock=QLocalServer();QLocalServer.removeServer('MurMur-desktop-v1');lock.listen('MurMur-desktop-v1')
+    store=Store(args.data_dir);controller=Controller(app,store,not args.no_hotkeys)
+    if lock:
+        def show():
+            conn=lock.nextPendingConnection();conn.close();controller.show_main()
+        lock.newConnection.connect(show)
+    if not args.tray:controller.show_main()
+    if args.screenshots:
+        path=Path(args.screenshots);path.mkdir(parents=True,exist_ok=True)
+        def shots():
+            if store.rows() and all(r['demo'] for r in store.rows()):controller.window.stats_source.setCurrentIndex(1)
+            for i,name in enumerate(('overview','history','dictionary','settings')):
+                controller.window.navigate(i)
+                # The normal navigation fade needs time to finish before an
+                # exported screenshot can represent the settled interface.
+                settle=QEventLoop();QTimer.singleShot(180,settle.quit);settle.exec()
+                app.processEvents();controller.window.grab().save(str(path/f'{name}.png'))
+            for i in range(controller.window.settings_tabs.count()):
+                controller.window.settings_tabs.setCurrentIndex(i);app.processEvents();controller.window.grab().save(str(path/f'settings-{i}.png'))
+            controller.preview.show_text('These are the original words, ready for refinement.','These are the refined words, ready to use.','Demo preview · no API was called',False);app.processEvents();controller.preview.grab().save(str(path/'preview.png'))
+            for state in ('待机','录音','识别','整理','完成','失败'):
+                controller.bubble.state(state,'Demo state',True);app.processEvents();controller.bubble.grab().save(str(path/f'bubble-{state}.png'))
+            controller.quit()
+        QTimer.singleShot(800,shots)
+    return app.exec()
+
+if __name__=='__main__':main()
