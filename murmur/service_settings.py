@@ -1,9 +1,14 @@
 """Compact service model choices and separate detail pages; no I/O here."""
-from PySide6.QtCore import Qt, QSignalBlocker
+from PySide6.QtCore import Qt, QSignalBlocker, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from .ui import CompactComboBox, button, label, line_icon
 from .provider_icons import provider_icon
+
+AUTO_POLICY_DESCRIPTION='Prefers installed 4–8B models; otherwise uses other available local models.'
+AUTO_POLICY_HELP=('Auto prefers the smallest known installed text model in the 4–8B range. '
+                  'Otherwise it uses the existing parameter, file-size and name order; metadata may be incomplete. '
+                  'Model size does not guarantee writing accuracy. No downloads or cloud fallback.')
 
 
 class ModelLabel(QLabel):
@@ -23,6 +28,23 @@ class ModelLabel(QLabel):
                          self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width()))
 
 
+class ServiceStatusLabel(QLabel):
+    """Relay existing controller setText calls without changing their API."""
+    text_changed=Signal(str)
+
+    def __init__(self,text=''):
+        super().__init__(text)
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(True)
+        self.setObjectName('muted')
+        self.setStyleSheet('font-size:11px;')
+
+    def setText(self,text):
+        changed=text!=self.text()
+        super().setText(text)
+        if changed:self.text_changed.emit(text)
+
+
 class ServiceSettings:
     MODULES = (
         ('asr', '1 · Speech to Text', 'Turn your voice into text.'),
@@ -33,6 +55,7 @@ class ServiceSettings:
     def __init__(self, window):
         self.window = window
         self.syncing = False
+        self._choice_items = {}
         window.services_stack = QStackedWidget()
         window.services_stack.setMinimumWidth(0)
         window.services_overview = QWidget()
@@ -50,6 +73,7 @@ class ServiceSettings:
         window.services_cards = {}
         window.services_provider_marks = {}
         for kind, title, description in self.MODULES:
+            service_name = title.split(' · ', 1)[1]
             card = QFrame()
             card.setObjectName('serviceModule')
             card.setStyleSheet('QFrame#serviceModule{background:#252429;border:1px solid #38343f;border-radius:11px;}')
@@ -86,7 +110,14 @@ class ServiceSettings:
             progress.setStyleSheet('font-size:11px;')
             progress.hide()
             bottom.addWidget(progress)
+            if kind=='asr':
+                window.services_install_button=button('Install',window.install_offline.emit)
+                window.services_install_button.setFixedWidth(64)
+                window.services_install_button.setAccessibleName('Install selected speech model')
+                window.services_install_button.hide()
+                bottom.addWidget(window.services_install_button)
             test = button('Test', lambda checked=False, service=kind: window.request_service_test(service))
+            test.setAccessibleName('Test ' + service_name + ' connection')
             test.setProperty('overviewTest', True)
             test.setFixedWidth(76)
             details = button('', lambda checked=False, service=kind: window.show_service_test_details(service))
@@ -96,6 +127,7 @@ class ServiceSettings:
             details.setAccessibleName('View ' + title + ' test details')
             details.setEnabled(False)
             advanced = button('Advanced', lambda checked=False, service=kind: self.show_details(service))
+            advanced.setAccessibleName(service_name + ' advanced settings')
             advanced.setToolTip('Open ' + title.split(' · ')[1] + ' settings')
             bottom.addWidget(test)
             bottom.addWidget(details)
@@ -158,11 +190,21 @@ class ServiceSettings:
 
     def populate(self, kind, items, current):
         combo = self.window.services_model_choices[kind]
+        signature = tuple(items)
+        changed = self._choice_items.get(kind) != signature
+        popup_open = combo.view().isVisible()
+        highlighted = combo.itemData(combo.view().currentIndex().row()) if popup_open else None
         with QSignalBlocker(combo):
-            combo.clear()
-            for title, value, model in items:
-                combo.addItem(provider_icon(model, 20), title, value)
-            combo.setCurrentIndex(max(0, combo.findData(current)))
+            if changed:
+                combo.clear()
+                for title, value, model in items:
+                    combo.addItem(provider_icon(model, 20), title, value)
+                self._choice_items[kind] = signature
+            selected = max(0, combo.findData(current))
+            if selected != combo.currentIndex():
+                combo.setCurrentIndex(selected)
+            if changed and popup_open and combo.findData(highlighted) >= 0:
+                combo.view().setCurrentIndex(combo.model().index(combo.findData(highlighted), 0))
         combo.setToolTip(combo.currentText() + ' · Save changes to apply.')
         self.window.services_provider_marks[kind].setPixmap(provider_icon(items[max(0, combo.currentIndex())][2], 20).pixmap(20, 20))
 
@@ -178,31 +220,58 @@ class ServiceSettings:
             engine = w.fields['offline_engine'].currentData()
             speech = [(model_spec(key, w.fields['offline_acceleration'].currentData() if key == engine else 'cpu')['name'], key, key) for key in ('sensevoice', 'paraformer', 'fun_asr_nano', 'qwen_asr')]
             speech += [('Bailian · ' + (w.fields['asr_model'].text().strip() or 'Unspecified'), 'bailian', 'bailian'), ('Alibaba Speech · realtime', 'ali_nls', 'ali_nls')]
+            profiles=getattr(w,'_http_asr_profiles',{})
+            for backend,title in (('openai','OpenAI'),('groq','Groq'),('http_asr','Custom API')):
+                model=w.fields['asr_http_model'].text().strip() if provider==backend else profiles.get(backend,{}).get('model','')
+                speech.append((title+' · '+(model or 'Specify model'),backend,backend))
             self.populate('asr', speech, engine if provider == 'offline' else provider)
+            install=w.services_install_button
+            install.setVisible(provider=='offline' and not getattr(w,'_offline_model_present',False))
+            install.setEnabled(w._session_phase=='idle' and not w.service_test_busy['asr'] and not w._offline_download_busy)
+            install.setToolTip(w.offline_status.text()+'\nDownload only starts when you click. Advanced lets you choose the model folder.')
             if provider == 'offline':
                 w.services_model_choices['asr'].setToolTip(w.services_model_choices['asr'].currentText() + '\n' + w.offline_status.text() + '\nOpen Advanced for model files and downloads.')
             local = is_local_endpoint(w.fields['llm_url'].text())
             auto = bool(w.fields['ollama_auto'].currentData()) and (local or bool(w.fields['ollama'].currentData()))
             model = w.fields['llm_model'].text().strip()
             online = w._llm_source_profiles.get(False) or (w.store.config['online_llm_url'], w.store.config['online_llm_model'])
-            resolved = w.service_model_metadata.get('llm', {}).get('model')
-            text_choices = [('Local · Auto', 'local_auto', resolved or 'auto-local'), ('Qwen3.5 · 2B', '2b', 'qwen'), ('Qwen3.5 · 4B', '4b', 'qwen'), ('Qwen3.5 · 9B', '9b', 'qwen'), ('Online · ' + online[1], 'online', online[1]), ('DeepSeek · Flash', 'deepseek', 'deepseek')]
+            metadata = w.service_model_metadata.get('llm', {})
+            resolved = metadata.get('model') if metadata.get('model_selection') == 'auto' else None
+            text_choices = [('Auto · '+resolved if resolved else 'Local · Auto', 'local_auto', resolved or 'auto-local'), ('Qwen3.5 · 2B', '2b', 'qwen'), ('Qwen3.5 · 4B', '4b', 'qwen'), ('Qwen3.5 · 9B', '9b', 'qwen')]
+            standard_deepseek = w.fields['llm_url'].text().strip().rstrip('/') == 'https://api.deepseek.com/v1' and model == 'deepseek-flash' and not bool(w.fields['ollama_auto'].currentData()) and not bool(w.fields['ollama'].currentData())
+            profile_deepseek = online[0].strip().rstrip('/') == 'https://api.deepseek.com/v1' and online[1] == 'deepseek-flash' and (len(online) < 3 or not online[2]) and (len(online) < 4 or not online[3])
+            if local and not profile_deepseek or not local and not standard_deepseek:
+                text_choices.append(('Online · ' + ('Auto' if auto else model or 'Unspecified') if not local else 'Online · ' + online[1], 'online', model if not local else online[1]))
+            text_choices.append(('DeepSeek · Flash', 'deepseek', 'deepseek'))
             current = 'local_auto' if local and auto else model.split(':')[-1] if local and model in ('qwen3.5:2b', 'qwen3.5:4b', 'qwen3.5:9b') else 'local_custom' if local else 'online'
+            if standard_deepseek:
+                current = 'deepseek'
             if local and not auto and current not in [item[1] for item in text_choices]:
                 text_choices.insert(4, ('Local · ' + (model or 'Unspecified'), current, model))
             if not local:
-                text_choices[4] = ('Online · ' + ('Auto' if auto else model or 'Unspecified'), 'online', model)
                 if 'deepseek.com' in w.fields['llm_url'].text().lower():
                     text_choices += [('DeepSeek · V4 Pro', 'deepseek_pro', 'deepseek')]
             self.populate('llm', text_choices, current)
+            auto_index=w.services_model_choices['llm'].findData('local_auto')
+            w.services_model_choices['llm'].setItemData(auto_index,AUTO_POLICY_HELP,Qt.ToolTipRole)
+            if current=='local_auto':
+                w.services_model_choices['llm'].setToolTip(w.services_model_choices['llm'].currentText()+'\n'+AUTO_POLICY_HELP+('\nLast successful check resolved '+resolved+'.' if resolved else '\nTest to identify the selected model.'))
             ask_model = w.fields['ask_llm_model'].text().strip()
             ask_items = [(ask_model or 'Model not specified', 'custom', ask_model), ('DeepSeek · Flash', 'deepseek', 'deepseek')]
-            ask_url = w.fields['ask_llm_url'].text().lower()
+            ask_endpoint = w.fields['ask_llm_url'].text().strip().rstrip('/')
+            ask_url = ask_endpoint.lower()
             if 'dashscope.aliyuncs.com' in ask_url:
                 ask_items += [('Qwen · Plus', 'qwen-plus', 'qwen'), ('Qwen · Turbo', 'qwen-turbo', 'qwen')]
             elif 'deepseek.com' in ask_url:
                 ask_items += [('DeepSeek · V4 Pro', 'deepseek_pro', 'deepseek')]
-            self.populate('ask', ask_items, 'custom')
+            ask_current = 'custom'
+            if ask_endpoint == 'https://api.deepseek.com/v1' and ask_model in ('deepseek-flash', 'deepseek-v4-pro'):
+                ask_current = 'deepseek' if ask_model == 'deepseek-flash' else 'deepseek_pro'
+            elif 'dashscope.aliyuncs.com' in ask_url and ask_model in ('qwen-plus', 'qwen-turbo'):
+                ask_current = ask_model
+            if ask_current != 'custom':
+                ask_items = [item for item in ask_items if item[1] != 'custom']
+            self.populate('ask', ask_items, ask_current)
             for kind, combo in w.services_model_choices.items():
                 combo.setEnabled(w._session_phase == 'idle' and not w.service_test_busy[kind] and not (kind == 'asr' and w._offline_download_busy))
         finally:

@@ -4,7 +4,7 @@
 
 **轻巧的 Windows 语音助手，让听写、翻译与文字编辑融入日常工作。**
 
-[![Version](https://img.shields.io/badge/version-0.4.0-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.5-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#快速开始)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@
 
 全新配置默认使用本机 SenseVoice 语音识别，并关闭 Demo。也可选择 Paraformer、Fun-ASR-Nano、Qwen3-ASR 或云端服务；文字处理可使用本机 Ollama 或 DeepSeek 等 OpenAI 兼容接口。通过预览与目标检查，决定哪些内容进入你的文档。
 
-> **项目状态：**当前 v0.4.0 为源码阶段版本，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
+> **项目状态：**当前 v0.4.5 为 Beta 迭代，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
 
 ## 功能
 
@@ -46,6 +46,8 @@
 主窗口固定为 **920 × 680** 逻辑像素，文字编辑窗口固定为 **680 × 440**。MurMur 自有窗口不支持手动缩放或最大化，详细设置在固定窗口内滚动，Services 主面板无需滚动。关闭主窗口进入托盘；通过 **Quit MurMur** 彻底退出。
 
 从结果气泡进入 **Edit result** 后可以编辑、复制，选区替换按钮隐藏，再次生成也保留该上下文。历史保存失败时，当前文字仍可使用，操作按钮会恢复并明确提示。导出仅在新文件完整写入后替换旧文件。
+
+整理失败时，结果气泡保留 **Copy / Review / Dismiss**。Review 打开原文编辑器，再次生成使用与普通听写一致的原语言、引文、术语和明确口误校验。平衡引文在请求前冻结、回复后按原样恢复；限定的星期关系检查可拦截明确的日程/截止时间变化。唯一的混语技术短语和清晰星期关系也会冻结；窄范围完成态和新增因果检测可拒绝已观测的问题。这些检查不能证明全部语义保真。
 
 ## 快速开始
 
@@ -98,7 +100,7 @@ Set-Location 'D:\LocalProjects\MurMur'
 | **Left Alt + Space** | 捕获选区，预览并编辑。 |
 | **Esc** | 取消当前操作。 |
 
-可在设置中修改快捷键及按住/切换模式。其他应用占用 Alt + Space 时，可改为 **Ctrl + Shift + Space**。禁用听写快捷键也会禁用 F8，胶囊仍可启动录音。
+可在设置中修改快捷键及按住/切换模式。其他应用占用 Alt + Space 时，可改为 **Ctrl + Shift + Space**。禁用听写快捷键也会禁用 F8；仍可通过 **Home → Record to preview** 开始录音。
 
 **Record to preview** 完成后显示紧凑结果气泡。成功的真实听写/翻译默认将最终文本写入剪贴板；Demo 需手动 Copy。点击 **Edit** 打开编辑器，**Dismiss** 关闭结果。选区编辑也先预览，点击 **Replace** 时再次核对原目标与选区。
 
@@ -120,13 +122,19 @@ Ask 固定采用点按录音，也可在 Shortcuts 中改为 **Ctrl + Shift + A*
 
 ### 语音识别（ASR）
 
+选中的本地模型缺失时，**Speech to Text** 主卡片直接显示 **Install**，复用已有哈希校验安装器。选择模型不会自动下载。**General → Audio capture** 控制批音频首尾静音裁剪和默认关闭的噪声门；首段余量仅保留已经采集的音频，不是按键前常驻录音。
+
+
 | 服务 | 运行位置 | 配置要求 |
 | --- | --- | --- |
 | **Local speech model · offline** | 本机 CPU / GPU | 使用下面的本地 ASR 模型进行离线听写，下载当前模型或选择兼容目录。 |
 | **Bailian · online（百炼 / DashScope）** | 云端 | 在线语音识别，需区域匹配的 API Key 与端点；默认模型为 `fun-asr-realtime`。 |
 | **Alibaba Speech · online（NLS）** | 云端 | 在线语音识别，语种按阿里项目配置；需项目 AppKey 与 Token，保存 AccessKey ID/Secret 可启用自动刷新。 |
+| **OpenAI** | 云端 | 独立 API Key，默认 `gpt-transcribe`；内存 WAV 批上传。 |
+| **Groq** | 云端 | 独立 API Key，默认 `whisper-large-v3-turbo`；内存 WAV 批上传。 |
+| **Custom HTTP ASR** | 明确的本机/局域网或外部端点 | 兼容 `/audio/transcriptions` 的 API 基础地址和准确模型名；不会自动切换服务。 |
 
-停止录音后进行本地识别，首次加载与首次显卡转录较慢，包含模型初始化和着色器编译。下载校验固定大小与 SHA256，并包含 Silero VAD，按停顿切段，单段最多约 20 秒，整次录音最多 10 分钟。缺少模型、运行库或显卡支持时会提示本地错误；可手动改选 CPU，音频不会自动转发到云端。
+本地和 HTTP 批识别在停止录音后进行；麦克风先于服务连接/本地模型准备开始采集，流式后端就绪后按顺序发送有界准备缓冲。首次加载与首次显卡转录较慢，包含模型初始化和着色器编译。下载校验固定大小与 SHA256，并包含 Silero VAD，按停顿切段，单段最多约 20 秒，整次录音最多 10 分钟。缺少模型、运行库或显卡支持时会提示本地错误；可手动改选 CPU，音频不会自动转发到云端。
 
 | 本地模型 | MurMur 使用的格式 / 加速 | 下载大小 | 语言 | 建议场景 | 默认模型目录名 |
 | --- | --- | --- | --- | --- | --- |
@@ -153,7 +161,7 @@ Paraformer 目前没有独立标点模型，因此原始转写可能缺少标点
 
 在 **Polish** 主卡片的模型下拉菜单选择 Local Auto、Qwen3.5 2B / 4B / 9B、DeepSeek Flash 或 Custom。**Advanced** 提供本地/在线来源、协议、地址、自定义模型和价格参数。预设只填写设置，不安装模型。已有地址、模型名称及凭据继续保留；选择新预设后，需要 **Save changes** 才应用草稿。
 
-新配置默认本地来源和 **Auto · installed models**，初始地址为 `http://127.0.0.1:11434/v1`。选择 **Specify model** 可保留固定模型名称。通用接口通过 `/models` 获取模型列表；可选的 Ollama 协议使用 `/api/tags`。优先选择已知参数规模更小的模型，再比较文件大小；排除云端、远程和嵌入模型条目。需要已有本地服务和模型，MurMur 不直接加载 LLM 权重、不自动下载、不自动回退在线服务。Auto 测试成功后，顶部摘要才显示实际模型；仅获取模型列表不能证明模型已加载。
+新配置默认本地来源和 **Auto · prefer 4–8B**，初始地址为 `http://127.0.0.1:11434/v1`。选择 **Specify model** 可保留固定模型名称。通用接口通过 `/models` 获取模型列表；可选的 Ollama 协议使用 `/api/tags`。先选择已安装、已知参数规模为 4–8B 的模型，并优先其中更小的模型；没有符合范围的模型时，沿用已知参数规模和文件大小排序；排除云端、远程和嵌入模型条目。需要已有本地服务和模型，MurMur 不直接加载 LLM 权重、不自动下载、不自动回退在线服务。Auto 测试成功后，顶部摘要才显示实际模型；仅获取模型列表不能证明模型已加载。
 
 **API protocol** 位于 **Advanced**，同处还可填写 API 地址和可选 Token 单价。接口协议与 **Source** 分开选择：LM Studio、vLLM、Ollama 等本地服务都可以提供 OpenAI 兼容接口。确认本地服务为 Ollama 后，自动使用关闭思考的快速参数；未知服务保持通用请求格式。服务探测不发送个人文本。[Ollama 官方兼容说明](https://docs.ollama.com/api/openai-compatibility)。
 
@@ -167,7 +175,7 @@ Paraformer 目前没有独立标点模型，因此原始转写可能缺少标点
 
 | 文字模型选择 | 建议场景 | 前提 |
 | --- | --- | --- |
-| **Auto** | 从已安装的小型本地模型开始 | 本地服务已运行；测试成功后显示实际选择的模型 |
+| **Auto** | 优先已安装的 4–8B；否则使用其他可用本地模型 | 本地服务已运行；测试成功后显示实际选择的模型 |
 | **Qwen3.5 2B** | 轻量整理、短听写润色 | 本地服务已安装 `qwen3.5:2b` |
 | **Qwen3.5 4B** | 日常整理、翻译与一般写作 | 本地服务已安装 `qwen3.5:4b` |
 | **Qwen3.5 9B** | 较复杂的写作与编辑 | 已安装 `qwen3.5:9b`，需要更多内存与计算资源 |
@@ -178,15 +186,15 @@ Paraformer 目前没有独立标点模型，因此原始转写可能缺少标点
 
 再次点击 Right Alt 停止录音后，胶囊持续显示实际处理步骤：开启整理的听写为 **Transcribe → Polish**，语音翻译为 **Transcribe → Translate**，选中文字操作只显示其实际编辑步骤。紫色填充覆盖整个胶囊背景，百分比按已完成步骤数计算；两步流程为 0%、50%，取得有效结果后为 100%。它不估计模型内部进度，也不会随计时循环前进。完成后用 240 ms 动效展开为结果气泡。真实听写/翻译结果默认写入剪贴板，**Copy** 复制全文、**Edit** 打开编辑器、**Dismiss** 关闭；演示结果仍需手动复制。取消和下一次录音会终止旧动效，旧回调不会重新弹出气泡。
 
-普通 Right Alt 听写将口语整理为清晰的书面表达：删除非语义填充词、无意重复和废弃开头，重组句子，并在原文已有层次时分段或列要点。明确的自我更正采用最后版本，包括术语和数值；保留真实的不确定性、否定、条件与观点，不把思考中的备选方案写成决定。中文仍是中文，中英混合保留应留下的英文术语；原有引文完整保留，原文中的问题或指令作为听写内容。关闭 **Refine transcription** 时直接使用识别文本，仍可应用个人字面替换规则。
+普通 Right Alt 听写将口语整理为清晰的书面表达：删除非语义填充词、无意重复和废弃开头，重组句子，并在原文已有层次时分段或列要点。明确的自我更正采用最后版本，包括术语和数值；保留真实的不确定性、否定、条件与观点，不把思考中的备选方案写成决定。中文仍是中文，中英混合保留应留下的英文术语；原有引文完整保留，原文中的问题或指令作为听写内容。关闭 **Refine dictated text** 时直接使用识别文本，仍可应用个人字面替换规则。
 
 翻译与 Ask 的编辑/写作共用同一套忠实表达标准：学术文字保持论证强度、术语、数值精度、单位和引用，日常沟通使用自然直接的措辞。翻译先整理非语义口语噪声，再表达为目标语言；原文中的问题仍译为问题。Ask 按语音要求执行任务，使用最后的明确更正，检查所要求的信息和排除项；改写保留选中文字的语言，除非要求翻译，普通问题仍按问答处理。默认使用连贯段落，不强制套用标题或列表。
 
 统一标准位于 [提示词源码](murmur/prompts.py)，Ask 路由位于 [assistant.py](murmur/assistant.py)。重启应用后，旧的内置默认提示词会自动升级；自定义提示词、历史与凭据保留。已记录的本地样例检查及其限制见[文字整理验证记录](docs/SERVICES_AND_WRITING_VALIDATION.md)。
 
-识别或整理失败时，原文保留在紧凑的错误气泡中，点击 **Copy／Edit** 才复制或打开编辑器；部分转写不会自动复制或上屏。没有转写时只显示原因和 **Dismiss**。已打开的选区编辑窗口在原位置显示错误。
+识别或整理失败时，原文保留在紧凑的错误气泡中，点击 **Copy／Review** 才复制或打开编辑器；部分转写不会自动复制或上屏。没有转写时只显示原因和 **Dismiss**。已打开的选区编辑窗口在原位置显示错误。
 
-离线语音使用 **Load & test** 检查文件并加载所选 ASR；在线语音和文字模型使用 **Test connection**。测试使用当前表单，不保存设置，也不录音。云端语音检查任务握手，文字服务发送固定短消息，在线测试可能消耗服务额度。测试进度与上次已完成的结果分开显示，重新检查期间保留旧结果，直到本次完成。顶部摘要和详情区分当前配置身份与成功测得的模型。修改相关草稿会使对应测试失效；保存凭据后密码框自动清空、继续使用相同已保存凭据时，不会误判为配置改变。
+离线语音使用 **Load & test** 检查文件并加载所选 ASR；在线语音和文字模型使用 **Test connection**。测试使用当前表单，不保存设置，也不录音。百炼/NLS 检查任务握手；OpenAI/Groq/自定义 HTTP 只检查认证与模型目录，不上传音频、不代表真实转写质量；文字服务发送固定短消息，在线测试可能消耗服务额度。测试进度与上次已完成的结果分开显示，重新检查期间保留旧结果，直到本次完成。顶部摘要和详情区分当前配置身份与成功测得的模型。修改相关草稿会使对应测试失效；保存凭据后密码框自动清空、继续使用相同已保存凭据时，不会误判为配置改变。
 
 ## Token 与费用
 
@@ -244,11 +252,13 @@ uv run murmur --offline-engine qwen_asr --offline-acceleration gpu --transcribe-
 | --- | --- |
 | 生命周期与会话控制 | [`app.py`](murmur/app.py) |
 | 主窗口、胶囊与预览 | [`dashboard.py`](murmur/dashboard.py)、[`ui.py`](murmur/ui.py) |
-| 语音与文字服务 | [`providers.py`](murmur/providers.py)、[`ali_nls.py`](murmur/ali_nls.py)、[`offline.py`](murmur/offline.py) |
+| 语音与文字服务 | [`providers.py`](murmur/providers.py)、[`cloud_asr.py`](murmur/cloud_asr.py)、[`audio_capture.py`](murmur/audio_capture.py)、[`offline.py`](murmur/offline.py) |
 | 存储与洞察 | [`storage.py`](murmur/storage.py)、[`insights.py`](murmur/insights.py) |
 | Windows 集成 | [`hotkeys.py`](murmur/hotkeys.py)、[`windows.py`](murmur/windows.py)、[`clipboard.py`](murmur/clipboard.py) |
 
-**2026-10-04** 此前记录的完整回归为 **927 项通过**，有三条上游依赖弃用警告。本次源码上传前，**95 项专项测试通过**，用时 8.71 秒。这是本地执行记录，不是 CI 徽章。源码启动、SenseVoice 与 Paraformer 官方样本离线识别和部分真实服务已验证；跨应用的完整真人听写到上屏、Windows 10、AltGr/输入法组合和混合 DPI 多屏仍需现场测试。[验证记录](docs/VALIDATION.md)包含此前测试结果，并区分真实、模拟与待验收项目。
+当前 **0.4.5 Beta** 为明确的第一人称“不确定／未确认／未决定”立场增加有限主体/状态保真检查，改善 compact-8 示例，并为 Services 控件提供对应模块的英文无障碍名称。已记录的冻结回归为 **1849 项通过**；6 条公开本地 4B 样例的人工质量评审为 5 条完整通过、1 条部分通过。“我希望”等偏好表达仍不在有限主体守卫范围内。改动、证据与限制见 [0.4.5 记录](docs/RELEASE_0.4.5.md)。
+
+此前 **0.4.4 本地 Beta** 新增限定技术短语/星期关系冻结、Dictation与Refine共用恢复、风险提示示例，以及观测到的完成态与新增因果保护。Services的新测试结果优先于旧下载状态。实际4B稿件、失败、最终守卫回放和源码验证分别记录于 [0.4.4验证](docs/RELEASE_0.4.4.md)；采集、多ASR与提示词的来源映射见 [TypeFree九节拆解](docs/TYPEFREE_ANALYSIS.md)。既有真实SenseVoice受控音频检查属于上一版记录。真人麦克风/噪声、物理快捷键、跨应用焦点/上屏和云端音频仍需现场验证。
 
 通过 [GitHub Issues](https://github.com/Chauncy-Du/murmur/issues)反馈问题或建议。请提供版本、服务和复现步骤；分享日志或截图前去掉凭据、个人文本和可识别个人的路径。
 
@@ -274,4 +284,8 @@ MurMur 源码采用 [MIT 许可证](LICENSE)。依赖及模型权重各自遵循
 </div>
 
 
-[v0.4.0 源码状态](docs/RELEASE_0.4.0.md)。
+[v0.4.1 本地 Beta 更新](docs/RELEASE_0.4.1.md)。
+
+此前迭代的设备关闭屏障、取消原文恢复、口误整理和公开模型质量限制见 [0.4.4 验证记录](docs/RELEASE_0.4.4.md)。
+
+当前本地 Beta：[0.4.5 改动与验证](docs/RELEASE_0.4.5.md)。

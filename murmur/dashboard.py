@@ -12,6 +12,7 @@ from .ui import SettingsForm, CompactComboBox, AdvancedSection, button, label, i
 from .insights import insights, analyze_vocabulary
 from .usage import is_local_endpoint
 from .storage import default_offline_model_dir
+from .version import __version__
 
 MODE_NAMES = {'听写': 'Dictation', '翻译': 'Translation', '润色': 'Refine', '总结': 'Summary', '扩写': 'Expand', '自定义': 'Custom', '语音指令': 'Voice instruction', '随便问': 'Ask Anything', '语音编辑': 'Voice edit', '问答': 'Question', '起草': 'Draft'}
 ASK_MODES = {'随便问', '语音编辑', '问答', '起草'}
@@ -258,7 +259,7 @@ class MainWindow(SettingsForm):
         b.setCheckable(True)
         nav.addWidget(b)
         self.nav_buttons.append(b)
-        version = label('0.4.0 · Stored locally', 'muted')
+        version = label(__version__ + ' · Stored locally', 'muted')
         version.setStyleSheet('font-size:10px;padding:0 9px;')
         nav.addWidget(version)
         outer.addWidget(side)
@@ -547,6 +548,18 @@ class MainWindow(SettingsForm):
                 control.setToolTip(hint if allowed else 'Finish the current session or connection test first.')
         if hasattr(self, '_service_settings'):
             self._service_settings.refresh()
+        for kind, controls in self.service_test_controls.items():
+            enabled = self._session_phase == 'idle' and not self.service_test_busy[kind] and not (kind == 'asr' and self._offline_download_busy)
+            for test, _, _ in controls:
+                test.setEnabled(enabled)
+                if self._session_phase != 'idle':
+                    test.setToolTip('Finish the current recording or processing before testing.')
+                elif kind == 'asr' and self._offline_download_busy:
+                    test.setToolTip('Wait for the speech model download to finish.')
+                elif kind=='asr' and 'asr_backend' in self.fields and self.fields['asr_backend'].currentData() in ('openai','groq','http_asr'):
+                    test.setToolTip('Check authentication and /models using this unsaved configuration. No audio is recorded or sent; transcription quality and audio API access are not tested.')
+                else:
+                    test.setToolTip('Test these settings without saving. Local tests stay on this device; online tests send a small request.')
         return allowed
 
     def show_token_insights(self):
@@ -774,7 +787,7 @@ class MainWindow(SettingsForm):
         if not rows:
             frame, body = card()
             body.addWidget(label('No matching sessions.' if self.search.text() or self.day_filter or mode != 'all' else 'Your next idea starts here.'))
-            body.addWidget(label('Try another search or clear your filters.' if self.search.text() or self.day_filter or mode != 'all' else 'Record with the capsule or the button below. Your transcripts will appear here.', 'muted'))
+            body.addWidget(label('Try another search or clear your filters.' if self.search.text() or self.day_filter or mode != 'all' else 'Use the button below or your dictation shortcut. Your transcripts will appear here.', 'muted'))
             if not self.search.text() and not self.day_filter and mode == 'all':
                 record = button('Record to preview', self.record.emit, True)
                 record.setToolTip('Recording here opens a preview. Use your configured shortcut in another app to insert text.')
@@ -941,16 +954,20 @@ class MainWindow(SettingsForm):
         source = self.word_filter.currentData()
         words = [w for w in self.store.words() if query in w['word'].casefold() and (source == 'all' or w['source'] == source)]
         context_size = len(self.store.config['hotwords'])
-        self.vocabulary_notice.setText(f'All terms stay in your local dictionary. Supported FunASR models receive the first 400 context characters ({context_size:,} total).')
+        self.update_dictionary_context_notice(context_size)
+        from .service_settings import ModelLabel
         for i, word in enumerate(words):
             item = QFrame()
             item.setObjectName('card')
             row = QHBoxLayout(item)
             row.setContentsMargins(11, 5, 5, 5)
-            text = label(word['word'])
+            text = ModelLabel()
+            text.setText(word['word'])
+            text.setStyleSheet('font-size:13px;color:#e7e7eb;')
+            text.setAccessibleName(word['word'])
             text.setMinimumWidth(0)
             text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            text.setToolTip('From local analysis' if word['source'] == '分析' else 'Added manually')
+            text.setToolTip(word['word']+'\n'+('From local analysis' if word['source'] == '分析' else 'Added manually'))
             row.addWidget(text, 1)
             row.addWidget(icon_button('close', 'Remove word', lambda checked=False, value=word['word']: self.remove_word(value)))
             self.words_grid.addWidget(item, i // 3, i % 3)
@@ -959,6 +976,30 @@ class MainWindow(SettingsForm):
         if not words:
             self.words_grid.addWidget(label('No matching terms.' if query or source != 'all' else 'Add a term, or analyze your vocabulary to get started.', 'muted'), 0, 0, 1, 3)
         self.dictionary_feedback(getattr(self.store, 'dictionary_warning', ''))
+
+    def update_dictionary_context_notice(self, context_size):
+        """Describe the saved active ASR, never an unsaved Settings draft."""
+        cfg=self.store.config
+        provider=cfg.get('asr_backend')
+        detail='Hints can help recognition but do not guarantee accuracy. All terms remain saved in the local dictionary.'
+        if cfg.get('demo'):
+            summary='Demo mode · Dictionary saved locally; no ASR hints are sent.'
+        elif provider=='bailian' and cfg.get('asr_model') in ('fun-asr-realtime','fun-asr-realtime-2025-11-07'):
+            summary=f'Saved locally · ASR hints: Bailian uses up to 400 of {context_size:,} context characters.'
+        elif provider in ('openai','groq','http_asr'):
+            from .cloud_asr import recognition_context
+            context=recognition_context(cfg)
+            if 'keywords[]' in context:
+                summary=f'Saved locally · ASR hints: OpenAI keywords ({len(context["keywords[]"])} terms).'
+                detail+=' Keywords are limited to 32 terms, 80 UTF-8 bytes per term and 1,000 bytes total.'
+            elif 'prompt' in context:
+                name='OpenAI' if provider=='openai' else 'Groq'
+                summary=f'Saved locally · ASR hints: {name} uses a short Dictionary prompt.'
+                detail+=' The prompt is limited to 200 UTF-8 bytes and keeps whole terms.'
+            else:summary='Saved locally · This ASR model does not receive Dictionary hints.'
+        else:summary='Saved locally · This ASR model does not receive Dictionary hints.'
+        self.vocabulary_notice.setText(summary)
+        self.vocabulary_notice.setToolTip(detail)
 
     def remove_word(self, word):
         try:
@@ -1038,13 +1079,18 @@ class MainWindow(SettingsForm):
 
     def _settings_snapshot(self):
         values,secrets=super()._settings_snapshot()
+        if hasattr(self,'asr_http_key'):
+            from .cloud_asr import KEY_SLOTS
+            self.remember_http_asr_profile()
+            values['asr_http_profiles']=deepcopy(self._http_asr_profiles)
+            secrets.update({KEY_SLOTS[provider]:key.strip() for provider,key in self._http_asr_keys.items()})
         online=self._llm_source_profiles.get(False) or self._llm_profiles.get(False)
         if online and not is_local_endpoint(online[0]):values.update(online_llm_url=online[0],online_llm_model=online[1])
         return values,secrets
 
     def wire_service_test_changes(self):
         groups = {
-            'asr': ('asr_backend', 'asr_model', 'asr_url', 'vocabulary_id', 'offline_engine', 'offline_model_dir', 'offline_language', 'offline_threads', 'offline_acceleration', 'ali_nls_url'),
+            'asr': ('asr_backend', 'asr_model', 'asr_url', 'vocabulary_id', 'offline_engine', 'offline_model_dir', 'offline_language', 'offline_threads', 'offline_acceleration', 'ali_nls_url','asr_http_url','asr_http_model','asr_http_language','asr_http_timeout'),
             'llm': ('ollama', 'ollama_auto', 'llm_url', 'llm_model', 'llm_input_price_per_million', 'llm_output_price_per_million', 'llm_cache_price_per_million'),
             'ask': ('ask_llm_url', 'ask_llm_model'),
         }
@@ -1053,7 +1099,7 @@ class MainWindow(SettingsForm):
                 field = self.fields[key]
                 signal = field.currentIndexChanged if isinstance(field, QComboBox) else field.valueChanged if isinstance(field, QSpinBox) else field.textChanged
                 signal.connect(lambda *args, service=kind: self.invalidate_service_test(service))
-        for kind, names in {'asr': ('asr_key', 'ali_appkey', 'ali_token'), 'llm': ('llm_key',), 'ask': ('ask_llm_key',)}.items():
+        for kind, names in {'asr': ('asr_key', 'ali_appkey', 'ali_token','asr_http_key'), 'llm': ('llm_key',), 'ask': ('ask_llm_key',)}.items():
             for name in names:
                 getattr(self, name).textChanged.connect(lambda *args, service=kind: self.invalidate_service_test(service))
 
@@ -1090,6 +1136,9 @@ class MainWindow(SettingsForm):
         form.addRow(row)
 
     def request_service_test(self, kind):
+        if self._session_phase != 'idle' or kind == 'asr' and self._offline_download_busy:
+            self.settings_status.setText('Finish the current recording, processing or model download before testing.')
+            return
         if self.service_test_busy.get(kind):
             return
         if not self.validate_price_fields():
@@ -1101,6 +1150,10 @@ class MainWindow(SettingsForm):
     def set_service_test_state(self, kind, busy, summary='', detail='', success=None):
         if kind not in self.service_test_controls:
             return
+        # A load/check is newer evidence than a preceding file-download notice.
+        # Keep the notice in Advanced, but never present it as the current test.
+        if kind == 'asr' and (busy or success is not None or summary and summary != 'Not checked'):
+            self._offline_download_test_superseded = True
         self.service_test_busy[kind] = bool(busy)
         self.update_settings_actions()
         if busy and self.service_test_results.get(kind, ('Not checked', ''))[0] == 'Not checked':
@@ -1114,7 +1167,7 @@ class MainWindow(SettingsForm):
         outcome = self.service_test_success.get(kind)
         color = '#a4a4ae' if outcome is None else '#a9cbb8' if outcome else '#dfa6ae'
         for test, status, details in self.service_test_controls[kind]:
-            test.setEnabled(not busy)
+            test.setEnabled(not busy and self._session_phase == 'idle' and not (kind == 'asr' and self._offline_download_busy))
             local_asr = kind == 'asr' and self.fields['asr_backend'].currentData() == 'offline'
             test.setText(('Checking' if busy else 'Test') if test.property('overviewTest') else 'Checking…' if busy else 'Load && test' if local_asr else 'Test connection')
             status.setText(summary)
@@ -1132,7 +1185,16 @@ class MainWindow(SettingsForm):
         summary, detail = self.service_test_results.get(kind, ('Checking…' if self.service_test_busy[kind] else 'Not checked', ''))
         dialog.test_summary.setText(summary)
         dialog.test_detail.setPlainText(detail)
-        dialog.test_context.setText('Last completed test; a new check is running.' if self.service_test_busy[kind] and detail else 'Uses the values currently shown in Settings.')
+        context='Last completed test; a new check is running.' if self.service_test_busy[kind] and detail else 'Uses the values currently shown in Settings.'
+        metadata=self.service_model_metadata.get(kind,{})
+        if kind=='llm' and metadata.get('model_selection')=='auto' and metadata.get('model'):
+            context='Auto → '+metadata['model']+' · Check only.'
+            if self.service_test_busy[kind]:
+                context='Last completed test; a new check is running. '+context
+        dialog.test_context.setText(context)
+        dialog.test_context.setAccessibleName(context)
+        from .service_settings import AUTO_POLICY_HELP
+        dialog.test_context.setToolTip(context+'\n'+AUTO_POLICY_HELP+'\nWriting quality is not verified by a connection check.' if kind=='llm' and metadata.get('model_selection')=='auto' else context)
 
     def show_service_test_details(self, kind):
         if kind not in self.service_test_dialogs:
@@ -1147,8 +1209,11 @@ class MainWindow(SettingsForm):
             layout.setSpacing(10)
             dialog.test_summary = label('')
             layout.addWidget(dialog.test_summary)
-            note = label('Uses the values currently shown in Settings.', 'muted')
-            note.setStyleSheet('font-size:11px;')
+            from .service_settings import ModelLabel
+            note = ModelLabel()
+            note.setText('Uses the values currently shown in Settings.')
+            note.setObjectName('muted')
+            note.setStyleSheet('font-size:11px;color:#a7a2b1;')
             layout.addWidget(note)
             dialog.test_context = note
             dialog.test_detail = QPlainTextEdit()
@@ -1169,8 +1234,8 @@ class MainWindow(SettingsForm):
         if not hasattr(self, 'key_status'):
             return
         disabled = self.fields['dictation_key'].currentData() == 'disabled'
-        self.key_status.setText('Dictation shortcuts disabled · Use the capsule to record' if disabled else 'F8 is a backup key · Press a shortcut to test it')
-        self.key_status.setToolTip('Disabled turns off the primary dictation key and F8. The capsule recording button remains available.')
+        self.key_status.setText('Dictation shortcuts disabled · Record from Home' if disabled else 'F8 is a backup key · Press a shortcut to test it')
+        self.key_status.setToolTip('Disabled turns off the primary dictation key and F8. Start recording with the Record button on Home.')
 
     def update_offline_engine(self, *args):
         if 'offline_model_dir' not in self.fields or not hasattr(self, 'offline_status'):
@@ -1215,7 +1280,11 @@ class MainWindow(SettingsForm):
 
     def set_offline_download_state(self, busy):
         self._offline_download_busy = bool(busy)
+        if busy:
+            self._offline_download_test_superseded = False
+            self.offline_status.setText('Preparing model download…')
         self.update_asr_fields()
+        self.update_settings_actions()
 
     def update_offline_readiness(self, *args):
         if not hasattr(self, 'offline_status') or self._offline_download_busy:
@@ -1241,6 +1310,7 @@ class MainWindow(SettingsForm):
             size = f'{size_bytes / 1_000_000_000:.2f} GB' if size_bytes >= 1_000_000_000 else f'{round(size_bytes / 1_000_000)} MB'
             self.offline_status.setText(f"{info['name']} files are missing. One-time download: about {size}.")
         self.offline_status.setToolTip('File presence only. Use Test connection to verify and load the selected model.')
+        self._offline_model_present=complete
         self.update_services_overview()
 
     def browse_offline_model(self):
@@ -1258,6 +1328,13 @@ class MainWindow(SettingsForm):
         offline = provider == 'offline'
         online_bailian = provider == 'bailian'
         ali_nls = provider == 'ali_nls'
+        http_asr=provider in ('openai','groq','http_asr')
+        if hasattr(self,'http_asr_panel'):
+            self.sync_http_asr_profile()
+            self.http_asr_panel.setVisible(http_asr)
+            for key in ('asr_http_url','asr_http_model','asr_http_language','asr_http_timeout'):
+                self.fields[key].setEnabled(http_asr)
+            self.asr_http_key.setEnabled(http_asr)
         self.online_asr_panel.setVisible(online_bailian)
         self.offline_asr_panel.setVisible(offline)
         self.ali_nls_panel.setVisible(ali_nls)
@@ -1279,6 +1356,50 @@ class MainWindow(SettingsForm):
             if not self.service_test_busy['asr']:
                 test.setText('Test' if test.property('overviewTest') else 'Load && test' if offline else 'Test connection')
         self.update_services_overview()
+        self.update_settings_actions()
+
+    def remember_http_asr_profile(self):
+        provider=getattr(self,'_http_asr_provider',None)
+        if provider:
+            self._http_asr_profiles[provider]={
+                'url':self.fields['asr_http_url'].text(),
+                'model':self.fields['asr_http_model'].text(),
+                'language':self.fields['asr_http_language'].currentData(),
+                'timeout':self.fields['asr_http_timeout'].value(),
+            }
+            self._http_asr_keys[provider]=self.asr_http_key.text()
+
+    def sync_http_asr_profile(self):
+        from .cloud_asr import HTTP_DEFAULTS
+        if not hasattr(self,'_http_asr_profiles'):
+            self._http_asr_profiles=deepcopy(HTTP_DEFAULTS)
+            for provider,profile in self.store.config.get('asr_http_profiles',{}).items():
+                if provider in HTTP_DEFAULTS and isinstance(profile,dict):self._http_asr_profiles[provider].update(profile)
+            self._http_asr_keys={provider:'' for provider in HTTP_DEFAULTS}
+            self._http_asr_provider=None
+            saved=self.store.config.get('asr_backend')
+            if saved in HTTP_DEFAULTS:
+                self._http_asr_profiles[saved]={key:self.store.config.get('asr_http_'+key,default) for key,default in HTTP_DEFAULTS[saved].items()}
+        provider=self.fields['asr_backend'].currentData()
+        if provider==self._http_asr_provider:return
+        self.remember_http_asr_profile()
+        if provider not in HTTP_DEFAULTS:
+            self._http_asr_provider=None
+            return
+        self._http_asr_provider=provider
+        profile=self._http_asr_profiles[provider]
+        # Block per-field callbacks until all four values describe one provider.
+        from PySide6.QtCore import QSignalBlocker
+        widgets=[self.fields['asr_http_'+key] for key in ('url','model','language','timeout')]+[self.asr_http_key]
+        blockers=[QSignalBlocker(widget) for widget in widgets]
+        self.fields['asr_http_url'].setText(profile['url'])
+        self.fields['asr_http_model'].setText(profile['model'])
+        language=self.fields['asr_http_language']
+        if language.findData(profile['language'])<0:language.addItem(profile['language'],profile['language'])
+        language.setCurrentIndex(language.findData(profile['language']))
+        self.fields['asr_http_timeout'].setValue(profile['timeout'])
+        self.asr_http_key.setText(self._http_asr_keys[provider])
+        del blockers
 
     def update_llm_fields(self, *args):
         if not hasattr(self, 'llm_key') or 'llm_url' not in self.fields:
@@ -1367,6 +1488,8 @@ class MainWindow(SettingsForm):
             speech += ' · ' + self.fields['offline_acceleration'].currentData().upper() + ' · local'
         elif provider == 'bailian':
             speech = (self.fields['asr_model'].text().strip() or 'Model not specified') + ' · Bailian · online'
+        elif provider in ('openai','groq','http_asr'):
+            speech=(self.fields['asr_http_model'].text().strip() or 'Model not specified')+' · '+{'openai':'OpenAI','groq':'Groq','http_asr':'Custom API'}[provider]+' · batch upload'
         else:
             speech = 'Alibaba Speech · online'
         self.service_overview_models['asr'].setText(speech)
@@ -1382,7 +1505,8 @@ class MainWindow(SettingsForm):
         if metadata.get('parameter_size') and metadata['parameter_size'].lower() not in text_model.lower():
             text_model += ' · ' + metadata['parameter_size'] + ' model tag'
         self.service_overview_models['llm'].setText(text_model)
-        self.service_overview_models['llm'].setToolTip(text_model + '\n' + ('Model used by the last successful check.' if metadata else 'The model currently configured in Settings. Auto resolves an installed local model when tested or used.'))
+        from .service_settings import AUTO_POLICY_HELP
+        self.service_overview_models['llm'].setToolTip(text_model + '\n' + ('Model used by the last successful check.' if metadata else 'The model currently configured in Settings. Auto resolves an installed local model when tested or used.')+ ('\n'+AUTO_POLICY_HELP if automatic else ''))
         ask_metadata = self.service_model_metadata.get('ask', {})
         ask_model = self.fields['ask_llm_model'].text().strip() or 'Model not specified'
         if ask_metadata.get('response_model') and ask_metadata['response_model'] != ask_model:
@@ -1400,8 +1524,17 @@ class MainWindow(SettingsForm):
             color = '#a4a4ae' if outcome is None else '#a9cbb8' if outcome else '#dfa6ae'
             status.setStyleSheet(f'font-size:11px;color:{color};')
             progress = self.service_overview_progress[kind]
-            progress.setText('Checking…')
-            progress.setVisible(self.service_test_busy[kind])
+            downloading=kind=='asr' and provider=='offline' and self._offline_download_busy
+            download_status=self.offline_status.text() if kind=='asr' and provider=='offline' else ''
+            terminal=download_status.startswith(('Download failed.','Download cancelled.','Model files downloaded and verified.'))
+            if downloading or terminal and not getattr(self, '_offline_download_test_superseded', False):
+                status.setText(download_status)
+                status.setToolTip(download_status)
+                status.setStyleSheet('font-size:11px;color:'+('#dfa6ae;' if download_status.startswith('Download failed.') else '#a9cbb8;' if download_status.startswith('Model files downloaded') else '#a4a4ae;'))
+            progress.setText('Installing…' if downloading else 'Checking…')
+            progress.setVisible(downloading or self.service_test_busy[kind])
+            for _test,_label,details in self.service_test_controls[kind]:
+                details.setEnabled(bool(detail) and not downloading)
         if hasattr(self, '_service_settings'):
             self._service_settings.refresh()
 
@@ -1434,7 +1567,7 @@ class MainWindow(SettingsForm):
             return
         from .storage import credential
         saved = {}
-        for name in ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret'):
+        for name in ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret','asr_openai_key','asr_groq_key','asr_http_key'):
             try:
                 saved[name] = bool(credential(name))
             except Exception:
@@ -1447,6 +1580,11 @@ class MainWindow(SettingsForm):
             return 'Leave blank to keep it.' if value else 'Enter a key, then save.' if value is not None else 'Blank fields do not replace saved credentials.'
 
         self.asr_hint.setText(status('Key', saved['asr']) + ' · ' + key_guidance(saved['asr']))
+        if hasattr(self,'http_asr_hint'):
+            from .cloud_asr import KEY_SLOTS
+            value=saved.get(KEY_SLOTS.get(self.fields['asr_backend'].currentData()))
+            self.http_asr_hint.setText(status('Key',value)+' · '+key_guidance(value))
+            self.http_asr_hint.setToolTip('Credential presence only. This provider receives your recorded audio after you stop recording.')
         access_keys = None if any(saved[name] is None for name in ('ali_access_key_id', 'ali_access_key_secret')) else saved['ali_access_key_id'] and saved['ali_access_key_secret']
         self.ali_hint.setText(' · '.join([status('AppKey', saved['ali_appkey']), status('AccessKeys', access_keys), status('Token', saved['ali_token'])]) + '\nSaved AccessKeys refresh tokens automatically; manual tokens also work.')
         local = bool(self.fields['ollama'].currentData()) or is_local_endpoint(self.fields['llm_url'].text())

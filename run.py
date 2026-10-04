@@ -1,9 +1,10 @@
 if __name__ == '__main__':
     try:
         import multiprocessing
+        import sys
         multiprocessing.freeze_support()
         from murmur.app import main
-        main()
+        sys.exit(main())
     except Exception:
         import sys,traceback
         from murmur.paths import startup_error_log

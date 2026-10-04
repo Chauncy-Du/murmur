@@ -14,7 +14,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlencode
 
 from .storage import credential
-from .audio_levels import pcm_level
+from .audio_capture import PCMCollector
+from .audio_quality import require_speech
 from .ali_auth import obtain_token, AliAuthError
 
 DEFAULT_URL='wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1'
@@ -49,13 +50,29 @@ class NlsRecorder:
         self.started=0.;self.duration=0.;self.error='';self.raw='';self.audio=[]
         self.recorded_frames=0;self.stream=None;self.socket=None;self.closed=False
         self.task_id=uuid.uuid4().hex;self._appkey='';self._sentences={};self._pending='';self._pending_index=0
-        self._queue=queue.Queue(maxsize=50);self._lock=threading.Lock()
+        self._queue=queue.Queue(maxsize=50);self._lock=threading.RLock()
         self._start_claimed=False;self._start_finished=threading.Event()
         self._ready=threading.Event();self._completed=threading.Event();self._failed=threading.Event()
         self._stop_claimed=False;self._stop_finished=threading.Event()
         self._stop_sent=False
         self._cleanup_claimed=False;self._disposed=threading.Event();self._cleanup_finished=threading.Event()
         self._slot_held=False;self._reader=None;self._sender=None
+        self.capture=PCMCollector(cfg,on_level,cancel,defer_delivery=True,on_error=self._fail)
+        self._queue=self.capture.frames
+        if cfg.get("save_audio"):self.audio=self.capture._pcm
+
+    @property
+    def error(self):return self._error or (self.capture.error if hasattr(self,"capture") else "")
+    @error.setter
+    def error(self,value):self._error=value
+    @property
+    def duration(self):return self.capture.duration if hasattr(self,"capture") else self._duration
+    @duration.setter
+    def duration(self,value):self._duration=value
+    @property
+    def recorded_frames(self):return self.capture.recorded_frames if hasattr(self,"capture") else self._recorded_frames
+    @recorded_frames.setter
+    def recorded_frames(self,value):self._recorded_frames=value
 
     def _check(self):
         if self.cancel.is_set():raise InterruptedError()
@@ -70,7 +87,7 @@ class NlsRecorder:
 
     def _fail(self,message):
         with self._lock:
-            if self.cancel.is_set() or self.error or self._disposed.is_set():return
+            if self.cancel.is_set() or self._error or self._disposed.is_set():return
             self.raw=' '.join(value for value in (self.raw,self._pending) if value);self._pending=''
             self.error=message;self.closed=True;self._failed.set()
         self._schedule_cleanup()
@@ -90,6 +107,9 @@ class NlsRecorder:
             appkey=credential('ali_appkey')
             if not appkey:
                 raise _NlsError('Set the Alibaba NLS project AppKey in Settings before recording.')
+            try:self.capture.start()
+            except RuntimeError as exc:raise _NlsError(str(exc)) from None
+            self.started=self.capture.started
             try:token=obtain_token(self.cancel)
             except AliAuthError as exc:raise _NlsError(str(exc)) from None
             self._check()
@@ -115,15 +135,9 @@ class NlsRecorder:
             except Exception:
                 self._check();raise _NlsError('Could not start the NLS transcription request.') from None
             self._wait(self._ready,10,'NLS startup timed out. No microphone audio was sent.')
-            # Normal socket sends have a finite timeout too, so network failure
-            # cannot create an unbounded sender backlog.
-            import sounddevice as sd
-            stream=sd.RawInputStream(samplerate=SAMPLE_RATE,blocksize=FRAME_SAMPLES,
-                channels=1,dtype='int16',device=int(self.cfg.get('microphone','')) if self.cfg.get('microphone','') else None,
-                callback=self._audio)
-            self.stream=stream;self._check()
-            self._sender=threading.Thread(target=self._send_audio,name='MurMur-NLS-send',daemon=True)
-            self._sender.start();self.started=time.monotonic();stream.start();self._check()
+            self.capture.activate(self._send_frame)
+            self._sender=self.capture._worker
+            self._check()
         except InterruptedError:
             self._schedule_cleanup();raise
         except Exception as exc:
@@ -134,31 +148,14 @@ class NlsRecorder:
         finally:self._start_finished.set()
 
     def _audio(self,data,frames,time_info,status):
-        pcm=bytes(data);message=''
-        with self._lock:
-            if self.closed or self.cancel.is_set():return
-            if status:message='The microphone dropped audio. NLS recording stopped; your original text is preserved.'
-            elif len(pcm)!=frames*2:message='The microphone returned invalid PCM audio. Recording stopped.'
-            elif self.recorded_frames+frames>MAX_SECONDS*SAMPLE_RATE:message='The 10-minute recording limit was reached. Stop and begin a new recording.'
-            else:
-                self.recorded_frames+=frames;self.duration=self.recorded_frames/SAMPLE_RATE
-                if self.cfg.get('save_audio',False):self.audio.append(pcm)
-        if message:self._fail(message);return
-        try:self._queue.put_nowait(pcm)
-        except queue.Full:
-            self._fail('The NLS audio queue overflowed because the network could not keep up. Recording stopped; your original text is preserved.');return
-        # Audio callback does no network work and uses a small fixed frame.
-        self.level(pcm_level(pcm))
+        self.capture._audio(data,frames,time_info,status)
 
-    def _send_audio(self):
-        while not self.cancel.is_set() and not self._failed.is_set() and not self._disposed.is_set():
-            try:pcm=self._queue.get(timeout=.05)
-            except queue.Empty:
-                if self.closed:return
-                continue
-            try:self.socket.send_binary(pcm)
-            except Exception:
-                self._fail('NLS audio upload failed or timed out. Your original text is preserved.');return
+    def _send_frame(self,pcm):
+        self._check()
+        try:self.socket.send_binary(pcm)
+        except Exception:
+            self._fail('NLS audio upload failed or timed out. Your original text is preserved.')
+            raise RuntimeError('NLS audio upload failed.') from None
 
     def _receive(self):
         import websocket
@@ -178,38 +175,50 @@ class NlsRecorder:
         if self.cancel.is_set() or self._disposed.is_set() or self._failed.is_set():return
         try:
             if not isinstance(message,str) or len(message)>1_048_576:raise ValueError()
-            event=json.loads(message);header=event['header'];name=header['name']
-            if not isinstance(header,dict):raise ValueError()
-            if header.get('task_id',self.task_id)!=self.task_id:return
-            if header.get('namespace','SpeechTranscriber')!='SpeechTranscriber':return
-            code=header.get('status')
-            if name=='TaskFailed' or code!=20000000:
-                safe_code=str(code) if isinstance(code,int) and not isinstance(code,bool) else 'unknown'
-                self._fail(f'Alibaba NLS rejected the request (code {safe_code}). Check service activation, the project AppKey, and Token expiry.');return
-            if name=='TranscriptionStarted':self._ready.set();return
-            if name=='TranscriptionCompleted':
-                if not self._stop_sent:
-                    self._fail('NLS transcription ended before recording stopped. Your original text is preserved.');return
-                self._completed.set();return
-            if name not in ('TranscriptionResultChanged','SentenceEnd','SentenceBegin'):return
-            if not self._ready.is_set():raise ValueError()
-            payload=event.get('payload',{});index=payload.get('index');text=payload.get('result','')
-            if not isinstance(index,int) or isinstance(index,bool) or not 1<=index<=10000 or not isinstance(text,str):raise ValueError()
-            if name=='SentenceBegin':
-                if index not in self._sentences and index>=self._pending_index:
-                    self._pending='';self._pending_index=index
-                return
-            if name=='SentenceEnd':
-                self._sentences[index]=text.strip()
-                if index==self._pending_index:self._pending=''
-            else:
-                if index in self._sentences or index<self._pending_index:return
-                self._pending=text.strip();self._pending_index=index
-            self.raw=' '.join(value for _,value in sorted(self._sentences.items()) if value)
-            preview=' '.join(value for value in (self.raw,self._pending) if value)
-            self.partial(preview)
+            event=json.loads(message)
+            with self._lock:
+                # Parsing can overlap cancellation or a device/network failure.
+                # Commit text only while the session remains live under the
+                # same lock that freezes partial text in abort().
+                if self.cancel.is_set() or self._disposed.is_set() or self._failed.is_set():return
+                self._commit_event(event)
         except (ValueError,TypeError,KeyError,AttributeError):
             self._fail('NLS returned an invalid transcription response. Your original text is preserved.')
+
+    def _commit_event(self,event):
+        header=event['header'];name=header['name']
+        if not isinstance(header,dict):raise ValueError()
+        if header.get('task_id',self.task_id)!=self.task_id:return
+        if header.get('namespace','SpeechTranscriber')!='SpeechTranscriber':return
+        code=header.get('status')
+        if name=='TaskFailed' or code!=20000000:
+            safe_code=str(code) if isinstance(code,int) and not isinstance(code,bool) else 'unknown'
+            self._fail(f'Alibaba NLS rejected the request (code {safe_code}). Check service activation, the project AppKey, and Token expiry.');return
+        if name=='TranscriptionStarted':self._ready.set();return
+        if name=='TranscriptionCompleted':
+            if not self._stop_sent:
+                self._fail('NLS transcription ended before recording stopped. Your original text is preserved.');return
+            self._completed.set();return
+        if name not in ('TranscriptionResultChanged','SentenceEnd','SentenceBegin'):return
+        if not self._ready.is_set():raise ValueError()
+        payload=event.get('payload',{});index=payload.get('index');text=payload.get('result','')
+        if not isinstance(index,int) or isinstance(index,bool) or not 1<=index<=10000 or not isinstance(text,str):raise ValueError()
+        if name=='SentenceBegin':
+            if index not in self._sentences and index>=self._pending_index:
+                self._pending='';self._pending_index=index
+            return
+        if name=='SentenceEnd':
+            self._sentences[index]=text.strip()
+            if index==self._pending_index:self._pending=''
+        else:
+            if index in self._sentences or index<self._pending_index:return
+            self._pending=text.strip();self._pending_index=index
+        self.raw=' '.join(value for _,value in sorted(self._sentences.items()) if value)
+        preview=' '.join(value for value in (self.raw,self._pending) if value)
+        if not self.cancel.is_set():self.partial(preview)
+
+    def request_stop(self):
+        self.capture.request_stop()
 
     def stop(self):
         with self._lock:
@@ -219,10 +228,11 @@ class NlsRecorder:
             self._wait(self._stop_finished,35,'NLS completion timed out. Your original text is preserved.')
             return self.raw
         try:
+            self.capture.request_stop()
             self._wait(self._start_finished,15,'NLS startup timed out.')
-            with self._lock:stream=self.stream;self.stream=None
-            if stream:stream.stop();stream.close()
-            self.closed=True;self.duration=self.recorded_frames/SAMPLE_RATE
+            pcm=self.capture.stop();self.closed=True
+            try:require_speech(pcm,self.cfg)  # Uploaded frames are unchanged; only silence is checked here.
+            except RuntimeError as exc:raise _NlsError(str(exc)) from None
             if self._sender:
                 self._sender.join(10)
                 if self._sender.is_alive():raise _NlsError('NLS audio upload timed out. Your original text is preserved.')
@@ -241,8 +251,9 @@ class NlsRecorder:
         finally:self._stop_finished.set();self._schedule_cleanup()
 
     def abort(self):
-        self.cancel.set()
+        self.cancel.set();self.capture.abort()
         with self._lock:
+            self.raw=' '.join(value for value in (self.raw,self._pending) if value);self._pending=''
             self.closed=True;self.duration=self.recorded_frames/SAMPLE_RATE
             if not self._start_claimed:self._start_finished.set()
         self._schedule_cleanup()
@@ -252,6 +263,7 @@ class NlsRecorder:
             if self._cleanup_claimed:return
             self._cleanup_claimed=True
         def cleanup():
+            self.capture.abort()
             self._start_finished.wait();self._disposed.set()
             with self._lock:stream=self.stream;self.stream=None
             if stream:

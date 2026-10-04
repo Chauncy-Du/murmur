@@ -1,5 +1,7 @@
 # 第三方及参考说明
 
+TypeFree：https://github.com/Charlo-O/typefree ，参考固定提交 c6b0c769b897ebc49efcb48e2850d4b94c483d74（2026-10-02）。MIT，Copyright (c) 2024 TypeFree Team。借鉴已采集音频的首尾余量、20 ms RMS 静音/噪声门与服务能力分层；MurMur 以 Python 重实现并改用保守阈值，未复制其界面或品牌素材。原 MIT 全文、固定版本及算法差异见 murmur/vendor/typefree/LICENSE 和 NOTICE；完整源码拆解见 docs/TYPEFREE_ANALYSIS.md。
+
 CapsWriter-Offline：https://github.com/HaujetZhao/CapsWriter-Offline
 
 参考版本：84912d5218ee5e51e216c54dc15a1cb0f466eb76（2026-10-04 获取）。MIT，Copyright (c) 2026 Haujet Zhao。许可证原文见 docs/CapsWriter-Offline-LICENSE.txt。已阅读 recorder.py、hot_rule.py、global_hotkey.py、tray.py、llm_clipboard.py、llm_message_builder.py。MurMur 的录音、界面和会话控制独立编写，借鉴分层、录音队列、字词修正、托盘和剪贴板保护思路。本次 ONNX/GGUF 接入改编上游的 llama、Fun-ASR-Nano、Qwen3-ASR、SenseVoice 推理辅助代码，保留在 murmur/vendor/capswriter；原文件映射、改动说明与完整 MIT 许可见该目录的 NOTICE.md 和 LICENSE。

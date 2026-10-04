@@ -45,8 +45,8 @@ class FakeSocket:
 
 
 class FakeStream:
-    def __init__(self,**kwargs):self.options=kwargs;self.callback=kwargs['callback'];self.closed=False
-    def start(self):self.callback(bytes(3200),1600,None,None)
+    def __init__(self,**kwargs):self.options=kwargs;self.callback=kwargs['callback'];self.closed=False;self.started=False
+    def start(self):self.started=True;self.callback(b"\xe8\x03"*1600,1600,None,None)
     def stop(self):pass
     def abort(self):pass
     def close(self):self.closed=True
@@ -89,7 +89,7 @@ def test_official_start_audio_stop_protocol_partial_final_and_wav(setup,tmp_path
     r.start();assert r.stop()=='Final words.';assert r.stop()=='Final words.'
     assert r._cleanup_finished.wait(2)
     assert partials==['Partial words','Final words.']
-    assert r.duration==.1 and sock.pcm==[bytes(3200)]
+    assert r.duration==.1 and sock.pcm==[b"\xe8\x03"*1600]
     endpoint=urlsplit(connect[0][0]);assert parse_qs(endpoint.query)=={'token':['test-temporary-token']}
     assert endpoint.scheme=='wss' and connect[0][1]==dict(timeout=10,enable_multithread=True)
     start,stop=sock.commands
@@ -103,14 +103,14 @@ def test_official_start_audio_stop_protocol_partial_final_and_wav(setup,tmp_path
     assert sock.shuts==1
 
 
-def test_expired_or_disabled_service_error_is_sanitized_before_microphone(setup,monkeypatch):
+def test_rejected_service_error_is_sanitized_and_early_microphone_closed(setup,monkeypatch):
     sock,_,streams=setup
     def send(encoded):
         sock.task=json.loads(encoded)['header']['task_id']
         sock.event('TaskFailed',status=40000001,status_text='https://secret/?token=test-temporary-token&appkey=test-appkey')
     monkeypatch.setattr(sock,'send',send);r=recorder()
     with pytest.raises(RuntimeError,match='code 40000001') as error:r.start()
-    assert r._cleanup_finished.wait(2) and not streams
+    assert r._cleanup_finished.wait(2) and streams[0].closed
     assert 'test-temporary-token' not in str(error.value) and 'test-appkey' not in r.error
 
 
@@ -119,8 +119,8 @@ def test_connection_exception_never_exposes_token(setup,monkeypatch):
     def connect(url,**kwargs):raise RuntimeError('SDK '+url)
     monkeypatch.setattr(websocket,'create_connection',connect);r=recorder()
     with pytest.raises(RuntimeError,match='Could not connect') as error:r.start()
-    assert 'test-temporary-token' not in str(error.value) and not streams
     assert r._cleanup_finished.wait(2)
+    assert 'test-temporary-token' not in str(error.value) and streams[0].closed
 
 
 def test_missing_credential_does_not_connect_or_record(setup,monkeypatch):
@@ -129,7 +129,7 @@ def test_missing_credential_does_not_connect_or_record(setup,monkeypatch):
     assert r._cleanup_finished.wait(2) and not connect and not streams
 
 
-def test_token_refresh_failure_stops_before_connection_and_microphone(setup,monkeypatch):
+def test_token_refresh_failure_closes_early_microphone_before_connection(setup,monkeypatch):
     _,connect,streams=setup;observed=[];r=recorder()
     def obtain(cancel):
         observed.append(cancel)
@@ -137,7 +137,7 @@ def test_token_refresh_failure_stops_before_connection_and_microphone(setup,monk
     monkeypatch.setattr(ali_nls,'obtain_token',obtain)
     with pytest.raises(RuntimeError,match='token request failed.*Forbidden'):r.start()
     assert observed==[r.cancel]
-    assert r._cleanup_finished.wait(2) and not connect and not streams
+    assert r._cleanup_finished.wait(2) and not connect and streams[0].closed
 
 
 @pytest.mark.parametrize('endpoint',['ws://example.com/ws','wss://host/ws?token=secret','wss://user:pass@host/ws','wss://host/ws#fragment'])
@@ -155,18 +155,18 @@ def test_cancel_during_connect_is_nonblocking_and_late_connection_is_closed(setu
     worker=threading.Thread(target=run);worker.start();assert entered.wait(2)
     before=time.monotonic();r.abort();r.abort();assert time.monotonic()-before<.1
     assert not sock.closed.is_set();release.set();worker.join(2)
-    assert r._cleanup_finished.wait(2) and errors==['cancelled'] and not streams and sock.shuts==1
+    assert r._cleanup_finished.wait(2) and errors==['cancelled'] and streams[0].closed and sock.shuts==1
     r._event(json.dumps({'header':{'name':'SentenceEnd','status':20000000},'payload':{'index':1,'result':'late'}}))
     assert not r.raw
 
 
-def test_start_requires_server_ready_before_microphone_and_timeout_cleans(setup,monkeypatch):
+def test_start_captures_before_server_ready_and_timeout_closes_microphone(setup,monkeypatch):
     sock,_,streams=setup;monkeypatch.setattr(sock,'send',lambda encoded:None);r=recorder()
     original=r._wait
     def fast_wait(event,seconds,message):return original(event,.05,message)
     monkeypatch.setattr(r,'_wait',fast_wait)
     with pytest.raises(RuntimeError,match='startup timed out'):r.start()
-    assert r._cleanup_finished.wait(2) and not streams
+    assert r._cleanup_finished.wait(2) and streams[0].closed
 
 
 def test_partial_preserved_on_failure_and_no_cross_session_or_late_duplicate(setup):
@@ -189,7 +189,7 @@ def test_network_queue_overflow_bounded_and_terminates(setup,monkeypatch):
     def blocked_send(pcm):entered.set();release.wait(2)
     monkeypatch.setattr(sock,'send_binary',blocked_send);r=recorder();r.start();assert entered.wait(2)
     for _ in range(51):r._audio(bytes(3200),1600,None,None)
-    assert r._queue.qsize()==50 and 'overflowed' in r.error and r.closed
+    assert r._queue.qsize()<=50 and 'overflowed' in r.error and r.closed
     release.set();assert r._cleanup_finished.wait(2)
     with pytest.raises(RuntimeError,match='overflowed'):r.stop()
 
@@ -234,7 +234,7 @@ def test_cancelled_wait_for_connection_slot_does_not_connect(setup,monkeypatch):
         try:r.start()
         except InterruptedError:finished.set()
     worker=threading.Thread(target=start);worker.start();r.abort();worker.join(2)
-    assert finished.is_set() and r._cleanup_finished.wait(2) and not connect and not streams
+    assert finished.is_set() and r._cleanup_finished.wait(2) and not connect and all(stream.closed for stream in streams)
     assert not slot.acquire(blocking=False);slot.release()
 
 
@@ -265,3 +265,46 @@ def test_completion_timeout_preserves_original_and_releases_connection(setup,mon
     monkeypatch.setattr(r,'_wait',lambda event,seconds,message:original(event,.05,message))
     with pytest.raises(RuntimeError,match='completion timed out'):r.stop()
     assert r.raw=='Final words.' and r._cleanup_finished.wait(2)
+
+
+def test_nls_first_frame_is_captured_before_auth_and_connection(setup,monkeypatch):
+    sock,_,streams=setup;original=ali_nls.obtain_token;observed=[]
+    def token(cancel):
+        assert streams[0].started and sock.pcm==[]
+        observed.append('mic-before-token');return original(cancel)
+    monkeypatch.setattr(ali_nls,'obtain_token',token)
+    r=recorder();r.start();assert r.stop()=='Final words.'
+    assert observed==['mic-before-token'] and sock.pcm==[b'\xe8\x03'*1600]
+    assert r._cleanup_finished.wait(1)
+
+
+def test_nls_early_stop_seals_preparation_audio_then_finishes_after_handshake(setup,monkeypatch):
+    sock,_,streams=setup;entered=threading.Event();release=threading.Event();outcomes=[]
+    def connect(*args,**kwargs):entered.set();assert release.wait(2);return sock
+    monkeypatch.setattr(websocket,'create_connection',connect)
+    r=recorder();start=threading.Thread(target=r.start);start.start();assert entered.wait(1)
+    streams[0].callback(b'\xd0\x07'*1600,1600,None,None)
+    r.request_stop()
+    # Seal before the controller receives the eventual started callback.
+    streams[0].callback(b'\xb8\x0b'*1600,1600,None,None)
+    stop=threading.Thread(target=lambda:outcomes.append(r.stop()));stop.start()
+    wait_for(lambda:streams[0].closed)
+    streams[0].callback(b'\xb8\x0b'*1600,1600,None,None)
+    assert r.duration==.2
+    release.set();start.join(1);stop.join(2)
+    assert not start.is_alive() and not stop.is_alive() and outcomes==['Final words.']
+    assert sock.pcm==[b'\xe8\x03'*1600,b'\xd0\x07'*1600]
+    assert r._cleanup_finished.wait(1)
+
+
+def test_nls_silent_upload_does_not_accept_hallucinated_words(setup):
+    sock,_,_=setup;r=recorder()
+    # Replace the fixture's synthetic speech with silence; keep protocol events.
+    from murmur.audio_capture import PCMCollector
+    original=PCMCollector._audio
+    def silence(data,frames,timing,status):return original(r.capture,bytes(len(data)),frames,timing,status)
+    r.capture._audio=silence
+    r.start()
+    with pytest.raises(RuntimeError,match='No speech-level audio'):r.stop()
+    assert r._cleanup_finished.wait(1)
+    assert all(frame==bytes(len(frame)) for frame in sock.pcm)

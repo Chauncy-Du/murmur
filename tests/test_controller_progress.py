@@ -144,3 +144,57 @@ def test_old_started_callback_cannot_rewind_processing(controller):
     before = list(c.progress_reports)
     c.receive(s.id, 'started', None)
     assert s.phase == '整理' and c.progress_reports == before
+
+
+def test_microphone_frames_show_real_wave_during_service_preparation(controller):
+    from types import SimpleNamespace
+    c=controller
+    cfg=copy.deepcopy(c.store.config);cfg['demo']=False
+    stopped=[]
+    s=Session('听写',cfg,None,phase='启动')
+    s.recorder=SimpleNamespace(request_stop=lambda:stopped.append(True),duration=.1)
+    c.session=s;c.configure_progress(s)
+    c.bubble.state('启动','Connecting',False)
+    c.receive(s.id,'level',.7)
+    assert s.phase=='启动'  # A microphone frame is not proof the backend is ready.
+    assert c.bubble.wave.active and c.bubble.wave.display_levels()[-1]==.7
+    assert 'Microphone active' in c.bubble.toolTip()
+    c.stop()
+    assert stopped==[True] and s.phase=='等待停止'
+    assert not c.bubble.wave.active and c.bubble.isVisible()
+    c.receive(s.id,'level',.9)
+    assert not c.bubble.wave.active
+
+
+def test_stale_preparation_frame_does_not_start_new_session_wave(controller):
+    c=controller
+    cfg=copy.deepcopy(c.store.config);cfg['demo']=False
+    s=Session('听写',cfg,None,phase='启动');c.session=s
+    c.bubble.state('启动','Connecting',False)
+    c.receive('old-session','level',.8)
+    assert not c.bubble.wave.active
+
+
+def test_stop_before_background_recorder_publication_seals_later_start(controller,monkeypatch):
+    queued=[];events=[]
+    class QueuedThread:
+        def __init__(self,target,**kwargs):self.target=target
+        def start(self):queued.append(self.target)
+    class FakeRecorder:
+        raw='';duration=0.;error=''
+        def __init__(self,*args):self.sealed=False
+        def request_stop(self):self.sealed=True;events.append('sealed')
+        def start(self):
+            assert self.sealed
+            events.append('no-mic')
+            raise RuntimeError('Recording stopped before the microphone was ready.')
+        def abort(self):pass
+    c=controller
+    c.store.config['demo']=False
+    monkeypatch.setattr(app_module.threading,'Thread',QueuedThread)
+    monkeypatch.setattr(app_module,'Recorder',FakeRecorder)
+    c.toggle();s=c.session
+    assert s.recorder is None
+    c.stop();assert s.phase=='等待停止'
+    queued[0]()
+    assert events==['sealed','no-mic']

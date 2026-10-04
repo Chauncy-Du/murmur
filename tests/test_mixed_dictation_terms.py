@@ -33,7 +33,7 @@ def test_lexical_guard_only_applies_to_mixed_dictation(source,result):
 def test_dictation_pipeline_blocks_term_loss_but_explicit_translation_allows_it(monkeypatch):
     cfg=copy.deepcopy(DEFAULTS);cfg.update(demo=False,polish=True)
     monkeypatch.setattr(providers,'_chat_completion',lambda *a,**k:'我希望 API 气泡更小。')
-    with pytest.raises(RuntimeError,match='English terms'):
+    with pytest.raises(RuntimeError,match='protected terms.*original text is preserved'):
         providers.transform('我希望 API bubble 更小。','听写',cfg)
     cfg['language']='Chinese'
     assert providers.transform('I want a smaller API bubble.','翻译',cfg)=='我希望 API 气泡更小。'

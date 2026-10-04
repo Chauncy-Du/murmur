@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QScrollArea, QSizePolicy, QTabWidget, QVBoxLayout, QWidget,
 )
 from .ui import AdvancedSection, CompactComboBox, button, label, line_icon
-from .service_settings import ServiceSettings
+from .service_settings import ServiceSettings, ServiceStatusLabel, AUTO_POLICY_DESCRIPTION, AUTO_POLICY_HELP
 
 
 class SettingsRows(QVBoxLayout):
@@ -224,11 +224,21 @@ def build_settings(window):
         pass
     field(f, 'microphone', 'Microphone', 'choice', devices, 'Choose an input device for recording.')
     field(f, 'language', 'Translate into', description='Only used in Translation mode.')
+    _, f = group('General', 'Audio capture', 'waveform')
+    trim=field(f,'audio_quality_enabled','Trim silence for batch ASR','bool',description='Local and HTTP ASR only; streaming audio stays unchanged.')
+    trim.setToolTip('Keep lead-in and tail padding around speech before batch recognition. Original saved recordings stay unchanged.')
+    field(f,'audio_noise_gate','Reduce very quiet background noise','bool',description='Batch ASR only. May remove quiet speech; off by default.')
+    window.audio_advanced=AdvancedSection()
+    f.addRow(window.audio_advanced)
+    lead=window.field(window.audio_advanced.form,'audio_lead_padding_ms','Lead-in padding · ms','int')
+    lead.setRange(0,2000)
+    tail=window.field(window.audio_advanced.form,'audio_tail_padding_ms','Tail padding · ms','int')
+    tail.setRange(0,1000)
     _, f = group('General', 'Startup')
     field(f, 'startup', 'Launch at sign-in', 'bool', description='Start MurMur in the system tray.')
 
     window.asr_service_section, f = group('Services', 'Speech to Text', 'mic', window.services_detail_layouts['asr'])
-    backend = field(f, 'asr_backend', 'Provider', 'choice', [('Local speech model · offline', 'offline'), ('Bailian · online', 'bailian'), ('Alibaba Speech · online', 'ali_nls')], 'Choose where your audio is transcribed (ASR).')
+    backend = field(f, 'asr_backend', 'Provider', 'choice', [('Local speech model · offline', 'offline'), ('Bailian · online', 'bailian'), ('Alibaba Speech · online', 'ali_nls'), ('OpenAI · online', 'openai'), ('Groq · online', 'groq'), ('Custom compatible API · online', 'http_asr')], 'Choose where your audio is transcribed (ASR).')
     backend.currentIndexChanged.connect(window.update_asr_fields)
     asr_details = QVBoxLayout()
     asr_details.setSpacing(14)
@@ -277,7 +287,8 @@ def build_settings(window):
     window.offline_download = button('Download model', window.install_offline.emit)
     window.offline_download.setMaximumWidth(150)
     f.addRow(window.offline_download)
-    window.offline_status = note('')
+    window.offline_status = ServiceStatusLabel()
+    window.offline_status.text_changed.connect(lambda _text:window.update_services_overview())
     f.addRow(window.offline_status)
     f.addRow(note('This model produces the transcript. Polish uses a separate text model for refinement and translation.'))
     window.add_service_test_row(f, 'asr')
@@ -303,6 +314,22 @@ def build_settings(window):
     window.field(window.ali_advanced.form, 'ali_nls_url', 'WebSocket endpoint')
     window.ali_advanced.form.addRow(note('Enable real-time transcription on your Alibaba account. Manual tokens expire; renew them before expiry.'))
 
+    window.http_asr_panel, f = group('Services', 'Online · batch speech API', 'waveform', asr_details)
+    model=field(f,'asr_http_model','Model',description='Audio is uploaded after recording stops. Original language is preserved.')
+    window.asr_http_key=password(f,'API key','A separate key for this speech provider.','HTTP speech API key')
+    window.http_asr_hint=note('')
+    f.addRow(window.http_asr_hint)
+    f.addRow(note('Test checks authentication and the model catalog only. It sends no audio and does not verify transcription.'))
+    window.add_service_test_row(f,'asr')
+    window.http_asr_advanced=AdvancedSection()
+    f.addRow(window.http_asr_advanced)
+    window.field(window.http_asr_advanced.form,'asr_http_url','API base URL')
+    window.field(window.http_asr_advanced.form,'asr_http_language','Recognition language','choice',[('Auto detect','auto'),('Chinese','zh'),('English','en'),('Japanese','ja'),('Korean','ko'),('French','fr'),('German','de'),('Spanish','es')])
+    timeout=window.field(window.http_asr_advanced.form,'asr_http_timeout','Request timeout · seconds','int')
+    timeout.setRange(5,180)
+    window.http_asr_advanced.form.addRow(note('Up to 10 minutes. WAV audio is sent to the selected endpoint; redirects and automatic fallback are disabled. Custom APIs require an explicit endpoint and model.'))
+    window.http_asr_advanced.form.addRow(note('Supported OpenAI and Groq models use Dictionary terms as recognition hints, without a guarantee. Custom APIs receive no hints.'))
+
     window.llm_service_section, f = group('Services', 'Polish', 'edit', window.services_detail_layouts['llm'])
     window.llm_form = f
     window.llm_source = CompactComboBox()
@@ -321,8 +348,8 @@ def build_settings(window):
     window.llm_advanced = AdvancedSection()
     protocol = window.field(window.llm_advanced.form, 'ollama', 'API protocol', 'choice', [('OpenAI compatible', False), ('Ollama', True)])
     protocol.currentIndexChanged.connect(window.update_llm_fields)
-    selection = field(f, 'ollama_auto', 'Model selection', 'choice', [('Auto · installed models', True), ('Specify model', False)], 'Auto uses a small model available on your local service.')
-    selection.setToolTip('No downloads or cloud fallback.')
+    selection = field(f, 'ollama_auto', 'Model selection', 'choice', [('Auto · prefer 4–8B', True), ('Specify model', False)], AUTO_POLICY_DESCRIPTION)
+    selection.setToolTip(AUTO_POLICY_HELP)
     selection.currentIndexChanged.connect(window.update_llm_selection)
     field(f, 'llm_model', 'Text LLM', description='Model name; 4B means about 4 billion parameters.')
     window.llm_key = password(f, 'API key', 'Stored in Windows credentials.', 'Text processing API key')

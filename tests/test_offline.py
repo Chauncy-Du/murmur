@@ -104,20 +104,26 @@ def test_offline_microphone_lifecycle_and_optional_audio(tmp_path,monkeypatch):
     with wave.open(path) as saved:assert saved.getnframes()==1600
 
 
-def test_cancelled_model_load_never_opens_microphone(tmp_path,monkeypatch):
+def test_cancelled_model_load_closes_early_microphone(tmp_path,monkeypatch):
     import sounddevice
     import sherpa_onnx
     entered=threading.Event();release=threading.Event();errors=[];values=cfg(tmp_path)
     monkeypatch.setattr(offline,'_cached_key',None)
     def create(**kwargs):entered.set();assert release.wait(2);return FakeRecognizer()
     monkeypatch.setattr(sherpa_onnx.OfflineRecognizer,'from_sense_voice',create)
-    monkeypatch.setattr(sounddevice,'RawInputStream',lambda **kwargs:pytest.fail('Cancelled model load opened microphone'))
+    streams=[]
+    class EarlyStream:
+        def __init__(self,**kwargs):self.closed=threading.Event();streams.append(self)
+        def start(self):pass
+        def stop(self):pass
+        def close(self):self.closed.set()
+    monkeypatch.setattr(sounddevice,'RawInputStream',EarlyStream)
     recorder=offline.OfflineRecorder(values,lambda t:errors.append(t),lambda l:None,threading.Event())
     def work():
         try:recorder.start()
         except InterruptedError:pass
     worker=threading.Thread(target=work);worker.start();assert entered.wait(2);recorder.abort();recorder.abort();release.set();worker.join(2)
-    assert not worker.is_alive() and not errors and recorder.stream is None
+    assert not worker.is_alive() and not errors and recorder.stream is None and streams[0].closed.wait(1)
 
 
 def test_device_error_preserves_opt_in_pcm_still_waiting_for_collector(tmp_path,monkeypatch):
@@ -159,6 +165,49 @@ def test_offline_saving_disabled_never_writes_audio(tmp_path,monkeypatch):
     r=offline.OfflineRecorder(values,lambda text:None,lambda level:None,threading.Event());r.start()
     callbacks[0](speech(),1600,None,None);callbacks[0](speech(),1600,None,'input overflow');r.abort()
     assert r.save_audio(tmp_path/'must-not-exist.wav')=='' and not (tmp_path/'must-not-exist.wav').exists() and not r._saved_audio
+
+
+def test_local_model_load_follows_capture_and_keeps_starting_speech(tmp_path,monkeypatch):
+    import sounddevice
+    first=speech();order=[];received=[]
+    class Stream:
+        def __init__(self,**kwargs):self.callback=kwargs['callback']
+        def start(self):order.append('mic');self.callback(first,1600,None,None)
+        def stop(self):pass
+        def close(self):pass
+    def load(*args):
+        order.append('model');assert order==['mic','model'];return FakeRecognizer()
+    def decode(pcm,*args):received.append(pcm);return 'Starting words.'
+    monkeypatch.setattr(sounddevice,'RawInputStream',Stream)
+    monkeypatch.setattr(offline,'load_recognizer',load)
+    monkeypatch.setattr(offline,'transcribe_pcm',decode)
+    r=offline.OfflineRecorder(cfg(tmp_path),lambda text:None,lambda level:None,threading.Event())
+    r.start();assert r.stop()=='Starting words.'
+    assert received==[first] and r.duration==.1
+
+
+def test_local_slow_prepare_buffer_overflow_never_decodes_truncated_speech(tmp_path,monkeypatch):
+    import sounddevice
+    streams=[];entered=threading.Event();release=threading.Event();outcomes=[]
+    class Stream:
+        def __init__(self,**kwargs):self.callback=kwargs['callback'];self.closed=threading.Event();streams.append(self)
+        def start(self):pass
+        def stop(self):pass
+        def close(self):self.closed.set()
+    def load(*args):entered.set();assert release.wait(2);return FakeRecognizer()
+    monkeypatch.setattr(sounddevice,'RawInputStream',Stream)
+    monkeypatch.setattr(offline,'load_recognizer',load)
+    monkeypatch.setattr(offline,'transcribe_pcm',lambda *args:pytest.fail('Failed preparation decoded partial audio'))
+    r=offline.OfflineRecorder(cfg(tmp_path),lambda text:None,lambda level:None,threading.Event())
+    def start():
+        try:r.start()
+        except RuntimeError as exc:outcomes.append(str(exc))
+    worker=threading.Thread(target=start);worker.start();assert entered.wait(1)
+    for _ in range(51):streams[0].callback(speech(),1600,None,None)
+    assert streams[0].closed.wait(1) and 'overflowed' in r.error
+    release.set();worker.join(1)
+    assert not worker.is_alive() and len(outcomes)==1 and 'overflowed' in outcomes[0]
+    with pytest.raises(RuntimeError,match='overflowed'):r.capture.check()
 
 
 @pytest.mark.parametrize('language',['auto','zh','en','ja','ko','yue'])

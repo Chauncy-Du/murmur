@@ -777,7 +777,8 @@ class ResultBubble(QWidget):
             control.setVisible(recoverable)
             control.setEnabled(recoverable)
         self.copy_button.setToolTip('Copy the original transcript' if error_message else 'Copy the full result')
-        self.edit_button.setToolTip('Edit the original transcript' if error_message else 'Open the editor')
+        self.edit_button.setText('Review' if error_message else 'Edit')
+        self.edit_button.setToolTip('Review the original transcript and retry refinement in the editor' if error_message else 'Open the editor')
         self.preview.setPlainText(display_text)
         prefix = 'Demo · ' if demo else ''
         self.status.setText(prefix + (status_summary or status))
@@ -1126,15 +1127,17 @@ class SettingsForm(QMainWindow):
         from .storage import credential, credential_lock
         failed = False
         with credential_lock:
-            for name in ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret', 'ali_token_expiry'):
+            for name in ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret', 'ali_token_expiry', 'asr_openai_key', 'asr_groq_key', 'asr_http_key'):
                 try:
                     credential(name, '')
                 except Exception:
                     failed = True
-        for attribute in ('asr_key', 'llm_key', 'ask_llm_key', 'ali_appkey', 'ali_token'):
+        for attribute in ('asr_key', 'llm_key', 'ask_llm_key', 'ali_appkey', 'ali_token', 'asr_http_key'):
             field = getattr(self, attribute, None)
             if field is not None:
                 field.clear()
+        if hasattr(self, '_http_asr_keys'):
+            self._http_asr_keys={key:'' for key in self._http_asr_keys}
         refresh = getattr(self, 'update_credential_status', None)
         if refresh:
             refresh()

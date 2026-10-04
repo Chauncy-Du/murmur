@@ -46,12 +46,15 @@ def test_categories_and_field_snapshot_are_complete(window):
         'dictation_key', 'translation_key', 'selection_key', 'bubble_position',
         'bubble_screen', 'bubble_offset', 'bubble_width', 'retention',
         'save_audio', 'style', 'rules', 'ask_key', 'ask_llm_url', 'ask_llm_model', 'offline_acceleration',
+        'asr_http_url','asr_http_model','asr_http_language','asr_http_timeout',
+        'audio_quality_enabled','audio_noise_gate','audio_lead_padding_ms','audio_tail_padding_ms',
     }
     assert set(window.fields) == expected
     values, secrets = window._settings_snapshot()
     assert expected <= values.keys()
     assert set(values['prompts']) == set(window.store.config['prompts'])
-    assert secrets == {'asr': '', 'llm': '', 'ali_appkey': '', 'ali_token': '', 'ask_llm': ''}
+    assert secrets == {'asr': '', 'llm': '', 'ali_appkey': '', 'ali_token': '', 'ask_llm': '',
+                       'asr_openai_key':'','asr_groq_key':'','asr_http_key':''}
     assert window.fields['bubble_width'].value() == 168
     assert window.main_sidebar.isHidden()
 

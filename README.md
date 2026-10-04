@@ -4,7 +4,7 @@
 
 **A compact Windows voice assistant for dictation, translation, and text editing.**
 
-[![Version](https://img.shields.io/badge/version-0.4.0-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.5-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@ MurMur turns two key presses into a short voice session: press to start, speak, 
 
 New profiles use local SenseVoice speech recognition with Demo mode off. You can also choose Paraformer, Fun-ASR-Nano, Qwen3-ASR or a cloud provider. Keep text processing local with Ollama, or use an OpenAI-compatible endpoint such as DeepSeek. Preview results and keep control over what reaches your documents.
 
-> **Project status:** v0.4.0 is the current source milestone; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
+> **Project status:** v0.4.5 is the current Beta iteration; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
 
 ## Features
 
@@ -44,6 +44,8 @@ New profiles use local SenseVoice speech recognition with Demo mode off. You can
 The English dark interface includes **Home**, **History**, **Dictionary**, and **Settings**. Settings uses a category sidebar and a persistent **Save changes** footer. **Services** opens a compact, scroll-free overview of **Speech to Text**, **Polish**, and **Ask Anything**. Each module has a model menu, connection check, and its own **Advanced settings** subpage. Unsaved changes stay intact when moving between these pages. Home combines compact insights, a square-cell activity calendar, and your configured shortcut keys. Changed history entries include **Compare original and result**, including short texts; details retain the complete original transcript, processed output and Ask selection separately.
 
 The main window is fixed at **920 × 680** logical pixels; the text editor is **680 × 440**. MurMur's own dialogs cannot be manually resized or maximized. Detailed settings scroll within the fixed window; the Services overview fits without scrolling. Closing the main window keeps MurMur in the tray; choose **Quit MurMur** to exit.
+
+A failed rewrite keeps **Copy**, **Review**, and **Dismiss** in the result bubble. **Review** opens the original transcript in the existing editor; generating a refined draft uses the same original-language, quotation, term and explicit-correction checks as dictation. Balanced quotations are frozen before the request and restored exactly; a narrow weekday check rejects clear schedule/deadline changes. Unique mixed-language technical phrases and clear weekday relations are also frozen. Narrow checks reject observed completed-action and added-cause changes; these checks do not prove complete semantic fidelity.
 
 Editing a floating result opens **Edit result**, with copying available and selection replacement hidden. Generating another version preserves that context. If history cannot be saved, MurMur keeps the current text available and restores the controls. History exports replace an existing file only after the new export is written completely.
 
@@ -98,11 +100,11 @@ For fully local dictation, select **Local speech model · offline** and disable 
 | **Left Alt + Space** | Capture selected text for preview and editing. |
 | **Esc** | Cancel the current operation. |
 
-Shortcuts and hold/toggle behavior are configurable. If another application uses Alt + Space, try **Ctrl + Shift + Space**. Disabling the dictation shortcut also disables F8; the capsule can still start recording.
+Shortcuts and hold/toggle behavior are configurable. If another application uses Alt + Space, try **Ctrl + Shift + Space**. Disabling the dictation shortcut also disables F8; use **Home → Record to preview** to start recording.
 
 **Record to preview** shows the compact result bubble. The second Right Alt tap ends recording and keeps the capsule visible. Dictation shows **Transcribe → Polish** when refinement is enabled; voice translation shows **Transcribe → Translate**. The purple background and percentage represent completed workflow steps: for a two-step operation, 0%, 50%, then 100% after a valid result. They do not estimate model-internal work or advance on a timer. Selected-text actions display their actual single operation; Ask Anything uses **Respond** for its assistant request. When ready, the capsule expands into the result over 240 ms. Successful real dictation and translation copy the final text to the clipboard automatically; Demo requires manual Copy. Use **Edit** to open the editor, or **Dismiss** to close the result. Selection editing also starts with a preview; **Replace** rechecks the original target and selection before writing.
 
-Speech or refinement failures stay in a compact error bubble. Recovered original text is available for manual **Copy** or **Edit**; errors never automatically copy or paste partial text. If no transcript was captured, only the diagnostic and **Dismiss** are shown. An already open selection editor retains its error in place.
+Speech or refinement failures stay in a compact error bubble. Recovered original text is available for manual **Copy** or **Review**; errors never automatically copy or paste partial text. If no transcript was captured, only the diagnostic and **Dismiss** are shown. An already open selection editor retains its error in place.
 
 ## Providers
 
@@ -122,13 +124,19 @@ Only the current spoken request and confirmed selection are sent, with a 12,000-
 
 ### Speech recognition (ASR)
 
+The main **Speech to Text** card offers **Install** when the selected local model is missing. Installation is user-triggered and uses the existing hash-checked installer; choosing a model never downloads it automatically. **General → Audio capture** controls batch silence trimming and an optional noise gate, off by default. Lead padding retains already-recorded samples; it is not always-on pre-keypress recording.
+
+
 | Provider | Runs | Setup |
 | --- | --- | --- |
 | **Local speech model · offline** | CPU / GPU on your computer | Choose a local ASR model below for offline dictation, then download it or choose a compatible folder. |
 | **Bailian · online (DashScope)** | Cloud | Online speech recognition with a matching regional API key and endpoint; default model: `fun-asr-realtime`. |
 | **Alibaba Speech · online (NLS)** | Cloud | Online speech recognition using the project's configured language; Project AppKey and access token, with AccessKey ID/Secret for automatic token refresh. |
+| **OpenAI** | Cloud | Independent API key, default `gpt-transcribe`; memory WAV batch upload. |
+| **Groq** | Cloud | Independent API key, default `whisper-large-v3-turbo`; memory WAV batch upload. |
+| **Custom HTTP ASR** | Explicit local/LAN or external endpoint | OpenAI-compatible `/audio/transcriptions` base URL and exact model ID; no provider fallback. |
 
-Recognition starts after recording stops. The first load and first GPU transcription take longer because of model initialization and shader compilation. Downloads are checked against pinned sizes and SHA256 hashes and include Silero VAD, which splits speech at pauses into segments up to approximately 20 seconds. The recording limit is 10 minutes. Missing models, runtimes or GPU support produce a local error; choose CPU manually if needed. Audio is not sent to a cloud fallback.
+Local and HTTP batch recognition runs after recording stops. Microphone capture starts before service connection or local-model preparation; streaming backends drain a bounded preparation queue when ready. The first load and first GPU transcription take longer because of model initialization and shader compilation. Downloads are checked against pinned sizes and SHA256 hashes and include Silero VAD, which splits speech at pauses into segments up to approximately 20 seconds. The recording limit is 10 minutes. Missing models, runtimes or GPU support produce a local error; choose CPU manually if needed. Audio is not sent to a cloud fallback.
 
 | Local model | MurMur format / acceleration | Download | Languages | Suggested use | Model folder name |
 | --- | --- | --- | --- | --- | --- |
@@ -155,7 +163,7 @@ This adapter provides plain-text dictation and existing dictionary replacements.
 
 Choose the **Polish** model menu: Local Auto, Qwen3.5 2B / 4B / 9B, DeepSeek Flash or Custom. **Advanced** contains local/online source, endpoint, protocol, custom model and pricing fields. Presets fill settings but do not install models. Existing endpoints, model names and credentials remain available; choosing a preset changes the draft and requires **Save changes**.
 
-New profiles use the local source with **Auto · installed models**, initially at `http://127.0.0.1:11434/v1`. Choose **Specify model** to keep a fixed model name. Auto lists models from the local endpoint's `/models` route; the optional Ollama protocol uses `/api/tags`. It prioritizes the smallest known parameter count, then file size, and excludes cloud/remote and embedding entries. A compatible server and an installed model are required; MurMur does not directly load LLM weights, download a model, or fall back to a cloud provider. Auto displays the actual model in the fixed summary only after a successful check. A generic model list does not prove a model is already loaded.
+New profiles use the local source with **Auto · prefer 4–8B**, initially at `http://127.0.0.1:11434/v1`. Choose **Specify model** to keep a fixed model name. Auto lists models from the local endpoint's `/models` route; the optional Ollama protocol uses `/api/tags`. It first prefers installed models with known 4–8B parameter counts, choosing the smallest in that band. If none qualifies, it uses the existing smaller-parameter/file-size ordering, and excludes cloud/remote and embedding entries. A compatible server and an installed model are required; MurMur does not directly load LLM weights, download a model, or fall back to a cloud provider. Auto displays the actual model in the fixed summary only after a successful check. A generic model list does not prove a model is already loaded.
 
 **API protocol** is in **Advanced**, alongside the API base URL and optional token prices. The protocol is separate from **Source**: local servers such as LM Studio, vLLM and Ollama can expose OpenAI-compatible endpoints. For a detected local Ollama server, requests disable thinking to reduce latency and token usage; unknown servers receive the standard request format. Detection sends no user text. See the [Ollama compatibility reference](https://docs.ollama.com/api/openai-compatibility).
 
@@ -169,7 +177,7 @@ New profiles use the local source with **Auto · installed models**, initially a
 
 | Text choice | Suggested use | Requirement |
 | --- | --- | --- |
-| **Auto** | Start with a small installed local model | Running local service; the successful test identifies the chosen model |
+| **Auto** | Prefer an installed 4–8B model; otherwise use another available local model | Running local service; the successful test identifies the chosen model |
 | **Qwen3.5 2B** | Light cleanup and short dictation refinement | Install `qwen3.5:2b` in the local server |
 | **Qwen3.5 4B** | General refinement, translation and everyday writing | Install `qwen3.5:4b` in the local server |
 | **Qwen3.5 9B** | More complex writing and editing | Install `qwen3.5:9b`; plan for more memory and processing resources |
@@ -178,13 +186,13 @@ New profiles use the local source with **Auto · installed models**, initially a
 
 The 2B / 4B / 9B suggestions are practical starting points, not measured speed or quality rankings. An existing `qwen:latest` (4B) configuration remains selectable through **Specify model**; it is not a Qwen3.5 preset and is not preselected by the new presets.
 
-Ordinary dictation keeps its original language and retained meaningful English terms in mixed speech. It turns speech into readable prose by removing nonsemantic fillers, accidental repeats and abandoned starts, then organizing actual points into sentences, paragraphs or supported lists. Explicit corrections replace earlier terms or values; genuine uncertainty, negation, conditions and the speaker's perspective remain. It preserves quotations verbatim and treats source questions and commands as dictated content. Turning **Refine transcription** off skips the model and retains recognized text, with any configured literal replacement rules applied.
+Ordinary dictation keeps its original language and retained meaningful English terms in mixed speech. It turns speech into readable prose by removing nonsemantic fillers, accidental repeats and abandoned starts, then organizing actual points into sentences, paragraphs or supported lists. Explicit corrections replace earlier terms or values; genuine uncertainty, negation, conditions and the speaker's perspective remain. It preserves quotations verbatim and treats source questions and commands as dictated content. Turning **Refine dictated text** off skips the model and retains recognized text, with any configured literal replacement rules applied.
 
 Translation and Ask editing/drafting share the same fidelity standards. Scholarly writing retains claim strength, terminology, numerical precision, units and citations; daily communication uses natural, direct phrasing. Translation cleans nonsemantic oral noise and expresses the intended meaning in the target language, including questions as questions. Ask follows the spoken request's final explicit correction and requested details/exclusions. Replacements retain the selection's language unless translation is requested; questions remain answers. Connected prose is the default; headings and lists are used only when supported or requested.
 
 The shared standards are in [prompts.py](murmur/prompts.py), with Ask routing in [assistant.py](murmur/assistant.py). Restart to load updated stock prompts; customized prompts, history and credentials are preserved. Prompt wording does not guarantee semantic quality for every model. Recorded local sample checks and their limits are summarized in [the writing validation record](docs/SERVICES_AND_WRITING_VALIDATION.md).
 
-Offline speech uses **Load & test** to check files and load the selected ASR engine; online speech and LLMs use **Test connection**. Tests use current form values without saving them or recording audio. Cloud ASR checks task initialization; text processing sends a fixed short test message, and cloud tests may use service quota. Progress is displayed separately from the last completed result, so a new check retains that result until it completes. The fixed summary and details distinguish the configured identity from a successfully tested model. Changing relevant draft settings invalidates the matching test; clearing the password field after saving a credential does not falsely invalidate a check that still uses the same saved credential.
+Offline speech uses **Load & test** to check files and load the selected ASR engine; online speech and LLMs use **Test connection**. Tests use current form values without saving them or recording audio. Bailian/NLS checks task initialization; OpenAI/Groq/custom checks authentication and the model catalog only, without uploading audio or claiming transcription quality; text processing sends a fixed short test message, and cloud tests may use service quota. Progress is displayed separately from the last completed result, so a new check retains that result until it completes. A new check supersedes an older download-complete or download-error notice; file status remains in Advanced. The fixed summary and details distinguish the configured identity from a successfully tested model. Changing relevant draft settings invalidates the matching test; clearing the password field after saving a credential does not falsely invalidate a check that still uses the same saved credential.
 
 ## Token usage and cost
 
@@ -242,11 +250,13 @@ uv run murmur --offline-engine qwen_asr --offline-acceleration gpu --transcribe-
 | --- | --- |
 | Lifecycle and session control | [`app.py`](murmur/app.py) |
 | Main window, capsule, and preview | [`dashboard.py`](murmur/dashboard.py), [`ui.py`](murmur/ui.py) |
-| Speech and text services | [`providers.py`](murmur/providers.py), [`ali_nls.py`](murmur/ali_nls.py), [`offline.py`](murmur/offline.py) |
+| Speech and text services | [`providers.py`](murmur/providers.py), [`cloud_asr.py`](murmur/cloud_asr.py), [`audio_capture.py`](murmur/audio_capture.py), [`offline.py`](murmur/offline.py) |
 | Storage and insights | [`storage.py`](murmur/storage.py), [`insights.py`](murmur/insights.py) |
 | Windows integration | [`hotkeys.py`](murmur/hotkeys.py), [`windows.py`](murmur/windows.py), [`clipboard.py`](murmur/clipboard.py) |
 
-An earlier recorded full-suite run on **2026-10-04** passed **927 tests** with three upstream dependency deprecation warnings. Before this source upload, **95 selected tests** passed in 8.71 seconds. This is a recorded local result, not a CI badge. Source startup, sample-based SenseVoice and Paraformer recognition, and selected live services were verified. Complete live dictation-to-insertion across applications, Windows 10, AltGr/input-method combinations, and mixed-DPI displays still need field testing. The [validation log](docs/VALIDATION.md) contains earlier run results and distinguishes real, simulated, and pending checks.
+The current **0.4.5 Beta** adds bounded participant/state fidelity checks for explicit first-person uncertainty, confirmation and decision statements, improves compact-8 examples, and gives service controls module-specific accessible names. The recorded frozen regression passed **1849 tests**; six public local 4B samples received five complete and one partial quality assessments. Preference statements such as “I hope” remain outside the narrow participant guard. See [0.4.5 changes and limits](docs/RELEASE_0.4.5.md).
+
+The earlier **0.4.4 local Beta** added narrow protected term/time spans, shared dictation/refinement recovery, bounded writing examples, and safeguards for observed causal and completed-action drift. Services now shows a new check ahead of older download status. Actual local 4B drafts, failures, final recorded-response replay and source checks are separated in [0.4.4 validation](docs/RELEASE_0.4.4.md); [TypeFree analysis](docs/TYPEFREE_ANALYSIS.md) maps the original audio, provider and prompt work. The earlier controlled SenseVoice audio check remains historical. Cloud audio, native hotkeys/insertion and real microphone/noise quality still need field testing.
 
 Report bugs or suggest improvements through [GitHub Issues](https://github.com/Chauncy-Du/murmur/issues). Include your version, provider, and reproduction steps; remove credentials, personal text, and identifying paths from logs or screenshots before sharing.
 
@@ -272,4 +282,6 @@ Thanks to CapsWriter-Offline for architectural inspiration, and to the SenseVoic
 </div>
 
 
-[v0.4.0 source status](docs/RELEASE_0.4.0.md).
+[v0.4.4 local Beta changes](docs/RELEASE_0.4.4.md).
+
+Current local Beta: [0.4.5 changes and validation](docs/RELEASE_0.4.5.md).

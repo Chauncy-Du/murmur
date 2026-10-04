@@ -21,7 +21,7 @@ def test_stream_partial_final_and_audio(monkeypatch):
         def stop(self):self.callback.on_complete()
     class FakeStream:
         def __init__(self,**kwargs):self.callback=kwargs['callback']
-        def start(self):self.callback(bytes(3200),1600,None,None)
+        def start(self):self.callback(b"\xe8\x03"*1600,1600,None,None)
         def stop(self):pass
         def close(self):pass
     monkeypatch.setattr(dashscope.audio.asr,'Recognition',FakeRecognition);monkeypatch.setattr(sounddevice,'RawInputStream',FakeStream);monkeypatch.setattr(murmur.providers,'credential',lambda name:'fake-test-key')
@@ -53,7 +53,7 @@ def test_stream_service_error(monkeypatch):
     r.abort()
 
 
-def test_abort_during_start_never_opens_microphone_or_accepts_late_text(monkeypatch):
+def test_abort_during_start_closes_early_microphone_and_rejects_late_text(monkeypatch):
     import time
     import dashscope.audio.asr
     import sounddevice
@@ -64,7 +64,13 @@ def test_abort_during_start_never_opens_microphone_or_accepts_late_text(monkeypa
         def start(self,**kwargs):entered.set();assert release.wait(2)
         def stop(self):self.stops+=1;stopped.set()
     monkeypatch.setattr(dashscope.audio.asr,'Recognition',FakeRecognition)
-    monkeypatch.setattr(sounddevice,'RawInputStream',lambda **kwargs:(_ for _ in ()).throw(AssertionError('Cancelled startup opened microphone')))
+    streams=[]
+    class EarlyStream:
+        def __init__(self,**kwargs):self.closed=threading.Event();streams.append(self)
+        def start(self):pass
+        def stop(self):pass
+        def close(self):self.closed.set()
+    monkeypatch.setattr(sounddevice,'RawInputStream',EarlyStream)
     monkeypatch.setattr(murmur.providers,'credential',lambda name:'fake-test-key')
     cfg=copy.deepcopy(DEFAULTS);cfg['demo']=False;r=Recorder(cfg,lambda t:errors.append(t),lambda l:None,threading.Event())
     def start():
@@ -72,6 +78,7 @@ def test_abort_during_start_never_opens_microphone_or_accepts_late_text(monkeypa
         except InterruptedError:pass
     worker=threading.Thread(target=start);worker.start();assert entered.wait(2)
     before=time.monotonic();r.abort();r.abort();assert time.monotonic()-before<.1
+    assert streams[0].closed.wait(1)
     assert not stopped.is_set()  # Recognition.stop must not race start.
     release.set();worker.join(2);assert not worker.is_alive();assert stopped.wait(2);assert instances[0].stops==1
     instances[0].callback.on_event(SimpleNamespace(get_sentence=lambda:dict(text='Late text',end_time=100)))
@@ -90,7 +97,7 @@ def test_audio_save_round_trip(monkeypatch,tmp_path):
         def stop(self):self.callback.on_complete()
     class FakeStream:
         def __init__(self,**kwargs):self.callback=kwargs['callback']
-        def start(self):self.callback(bytes(3200),1600,None,None)
+        def start(self):self.callback(b"\xe8\x03"*1600,1600,None,None)
         def stop(self):pass
         def close(self):pass
     monkeypatch.setattr(dashscope.audio.asr,'Recognition',FakeRecognition);monkeypatch.setattr(sounddevice,'RawInputStream',FakeStream);monkeypatch.setattr(murmur.providers,'credential',lambda name:'fake-test-key')
@@ -150,3 +157,61 @@ def test_abort_during_result_parsing_cannot_mutate_frozen_original(monkeypatch):
     worker=threading.Thread(target=lambda:callbacks[0].on_event(SimpleNamespace(get_sentence=sentence)))
     worker.start();assert entered.wait(2);r.abort();release.set();worker.join(2)
     assert r.raw=='Original partial' and not partials
+
+
+def test_microphone_opens_before_cloud_handshake_and_buffered_first_frame_is_sent(monkeypatch):
+    import dashscope.audio.asr
+    import sounddevice
+    import murmur.providers
+    order=[];sent=[];instances=[]
+    first=b'\xe8\x03'*1600
+    class Recognition:
+        def __init__(self,**kwargs):self.callback=kwargs['callback'];self._stream_data=queue.Queue()
+        def start(self,**kwargs):
+            order.append('cloud-start')
+            assert instances[0].started and sent==[]
+        def send_audio_frame(self,data):
+            sent.append(data)
+            self.callback.on_event(SimpleNamespace(get_sentence=lambda:dict(text='First words.',end_time=100)))
+        def stop(self):self.callback.on_complete()
+    class Stream:
+        def __init__(self,**kwargs):self.callback=kwargs['callback'];self.started=False;instances.append(self)
+        def start(self):
+            self.started=True;order.append('mic-start');self.callback(first,1600,None,None)
+        def stop(self):pass
+        def close(self):pass
+    monkeypatch.setattr(sounddevice,'RawInputStream',Stream)
+    monkeypatch.setattr(dashscope.audio.asr,'Recognition',Recognition)
+    monkeypatch.setattr(murmur.providers,'credential',lambda name:'synthetic-key')
+    cfg=copy.deepcopy(DEFAULTS);cfg.update(demo=False)
+    r=Recorder(cfg,lambda text:None,lambda level:None,threading.Event())
+    r.start();assert r.stop()=='First words.'
+    assert order==['mic-start','cloud-start'] and sent==[first]
+
+
+def test_streaming_silent_audio_cannot_turn_service_hallucination_into_final_text(monkeypatch):
+    import pytest
+    import dashscope.audio.asr
+    import sounddevice
+    import murmur.providers
+    closed=threading.Event();stopped=threading.Event()
+    class Recognition:
+        def __init__(self,**kwargs):self.callback=kwargs['callback'];self._stream_data=queue.Queue()
+        def start(self,**kwargs):pass
+        def send_audio_frame(self,data):
+            self.callback.on_event(SimpleNamespace(get_sentence=lambda:dict(text='Hallucinated speech',end_time=100)))
+        def stop(self):stopped.set();self.callback.on_complete()
+    class Stream:
+        def __init__(self,**kwargs):self.callback=kwargs['callback']
+        def start(self):self.callback(bytes(3200),1600,None,None)
+        def stop(self):pass
+        def close(self):closed.set()
+    monkeypatch.setattr(sounddevice,'RawInputStream',Stream)
+    monkeypatch.setattr(dashscope.audio.asr,'Recognition',Recognition)
+    monkeypatch.setattr(murmur.providers,'credential',lambda name:'synthetic-key')
+    cfg=copy.deepcopy(DEFAULTS);cfg.update(demo=False)
+    r=Recorder(cfg,lambda text:None,lambda level:None,threading.Event())
+    r.start()
+    with pytest.raises(RuntimeError,match='No speech-level audio'):r.stop()
+    with pytest.raises(RuntimeError,match='No speech-level audio'):r.stop()
+    assert stopped.wait(1) and closed.is_set()

@@ -2,6 +2,8 @@
 
 Only list existing server models: never install models or fall back to cloud.
 The standard model list does not guarantee a loaded state; do not infer it.
+Auto prefers the smallest known 4–8B text model, then uses the existing
+small-model fallback. This is a selection policy, not an accuracy guarantee.
 """
 import json
 import math
@@ -14,6 +16,10 @@ from .usage import is_local_endpoint, is_cloud_model
 
 
 class LocalModelError(RuntimeError):pass
+
+
+AUTO_PREFERRED_MIN_PARAMETERS=4_000_000_000
+AUTO_PREFERRED_MAX_PARAMETERS=8_000_000_000
 
 
 _CAPABILITY_CACHE=OrderedDict()
@@ -136,6 +142,12 @@ def _eligible(item):
 
 
 def _rank(item):
+    """Prefer a modest rewriting model before the previous smallest fallback.
+
+    Reported parameter counts and recognized B/M name tags are estimates, not
+    proof of capability. File size and Qwen/name tie-breaks stay within that
+    ordering; an allegedly loaded or tiny-file model cannot bypass the band.
+    """
     details=item.get('details')
     details=details if isinstance(details,dict) else {}
     match=re.fullmatch(r'\s*([\d.]+)\s*([BM])\s*',str(details.get('parameter_size',item.get('parameter_size',''))),re.I)
@@ -149,7 +161,8 @@ def _rank(item):
         if not math.isfinite(params) or params<=0:params=math.inf
     size=item.get('size')
     size=size if type(size) is int and size>0 else math.inf
-    return params,size,0 if re.search(r'(?:^|/)qwen',name,re.I) else 1,name.casefold(),name
+    preferred=AUTO_PREFERRED_MIN_PARAMETERS<=params<=AUTO_PREFERRED_MAX_PARAMETERS
+    return 0 if preferred else 1,params,size,0 if re.search(r'(?:^|/)qwen',name,re.I) else 1,name.casefold(),name
 
 
 def resolve_model(client,cfg,cancel=None):

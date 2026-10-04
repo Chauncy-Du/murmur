@@ -8,7 +8,7 @@ from murmur import storage
 from murmur.dashboard import MainWindow
 
 
-NAMES = ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret', 'ali_token_expiry')
+NAMES = ('asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token', 'ali_access_key_id', 'ali_access_key_secret', 'ali_token_expiry', 'asr_openai_key', 'asr_groq_key', 'asr_http_key')
 
 
 @pytest.fixture

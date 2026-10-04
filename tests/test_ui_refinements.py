@@ -4,7 +4,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QTest, QSignalSpy
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QCheckBox, QSpinBox, QStyleOptionSpinBox, QStyle
 from murmur import storage
 from murmur.dashboard import MainWindow
@@ -60,7 +60,12 @@ def test_fast_page_switching_cleans_effects_when_entering_settings_mode(window):
     focused = QApplication.focusWidget()
     assert focused is None or window.stack.currentWidget().isAncestorOf(focused)
     assert isinstance(window.stack.currentWidget().graphicsEffect(), QGraphicsOpacityEffect)
-    QTest.qWait(200)
+    animation=window._page_animation
+    assert animation.duration()==160
+    finished=QSignalSpy(animation.finished)
+    # Qt's first animation tick may follow a costly high-DPI initial paint.
+    # Wait for its real finished signal; never advance animation time manually.
+    assert finished.wait(600)
     assert all(window.stack.widget(i).graphicsEffect() is None for i in range(4))
     assert window._page_animation is None
 
@@ -96,7 +101,8 @@ def test_service_test_emits_current_snapshot_without_saving(window):
     kind, config, secrets = received[0]
     assert kind == 'llm'
     assert config['llm_model'] == 'unsaved-model'
-    assert set(secrets) == {'asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token'}
+    assert set(secrets) == {'asr', 'llm', 'ask_llm', 'ali_appkey', 'ali_token',
+                            'asr_openai_key','asr_groq_key','asr_http_key'}
     assert secrets['llm'] == 'mock unsaved secret'
     assert window.store.config['llm_model'] == original
     config['prompts']['润色'] = 'Modified test snapshot'

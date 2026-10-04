@@ -1,0 +1,13 @@
+TypeFree audio-quality design reference
+Copyright (c) 2024 TypeFree Team
+MIT License (see LICENSE).
+Reference: https://github.com/Charlo-O/typefree
+Pinned revision: c6b0c769b897ebc49efcb48e2850d4b94c483d74
+
+MurMur audio_quality.py is a new Python implementation informed by TypeFree
+audioManager.ts analyzeVoiceActivity/prepareAudioForTranscription and Rust
+commands/audio_quality.rs. It uses conservative fixed RMS silence screening,
+20ms frames and generous lead/tail trimming, not AI denoising or semantic VAD.
+Thresholds differ: default RMS floor 0.001; no percentile noise multiplier;
+gate is opt-in at half the fixed threshold. Original PCM is preserved for
+opt-in recording export. No idle microphone/pre-keypress ring buffer exists.

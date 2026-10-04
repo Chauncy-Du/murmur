@@ -12,7 +12,8 @@ import threading
 import time
 import wave
 from pathlib import Path
-from .audio_levels import pcm_level
+from .audio_capture import PCMCollector
+from .audio_quality import require_speech
 
 SAMPLE_RATE=16000
 MAX_SECONDS=600
@@ -269,45 +270,41 @@ class OfflineRecorder:
         self._lock=threading.Lock();self._start_finished=threading.Event()
         self._stop_finished=threading.Event();self._start_claimed=False
         self._stopping=False;self._cleanup_started=False
+        self.capture=PCMCollector(cfg,on_level,cancel,defer_delivery=True)
+        if cfg.get("save_audio"):self._saved_audio=self.capture._pcm
+
+    @property
+    def error(self):return self._error or (self.capture.error if hasattr(self,"capture") else "")
+    @error.setter
+    def error(self,value):self._error=value
+    @property
+    def duration(self):return self.capture.duration if hasattr(self,"capture") else self._duration
+    @duration.setter
+    def duration(self,value):self._duration=value
+    @property
+    def recorded_frames(self):return self.capture.recorded_frames if hasattr(self,"capture") else self._recorded_frames
+    @recorded_frames.setter
+    def recorded_frames(self,value):self._recorded_frames=value
 
     def start(self):
         with self._lock:
             if self._start_claimed:raise RuntimeError('The recorder has already been started.')
             self._start_claimed=True
         try:
+            # Honor fixture/custom bounded queues while using the common capture.
+            self.capture.frames=self.frames
+            self.capture.start();self.started=self.capture.started
             self.recognizer=load_recognizer(self.cfg,self.cancel)
-            _check_cancel(self.cancel)
-            import sounddevice as sd
-            def callback(data,frames,timing,status):
-                chunk=bytes(data)
-                with self._lock:
-                    if self.closed or self.cancel.is_set():return
-                    if status:self.error='The microphone dropped audio. Recording stopped; captured audio is preserved when saving is enabled.';self.closed=True;return
-                    if len(chunk)!=frames*2:self.error='The microphone returned invalid PCM audio. Recording stopped.';self.closed=True;return
-                    if self.recorded_frames+frames>MAX_SECONDS*SAMPLE_RATE:
-                        self.error='Offline recordings are limited to 10 minutes. Record a shorter passage.';self.closed=True;return
-                    self.recorded_frames+=frames;self.duration=self.recorded_frames/SAMPLE_RATE
-                    # References to the same PCM bytes; abort cannot omit
-                    # captured frames waiting in the collector queue.
-                    if self.cfg.get('save_audio'):self._saved_audio.append(chunk)
-                self.level(pcm_level(chunk))
-                try:self.frames.put_nowait(chunk)
-                except queue.Full:self.error='The offline audio queue overflowed. Recording stopped.';self.closed=True
-            stream=sd.RawInputStream(samplerate=SAMPLE_RATE,blocksize=1600,
-                                     channels=1,dtype='int16',
-                                     device=int(self.cfg['microphone']) if self.cfg.get('microphone') else None,
-                                     callback=callback)
-            with self._lock:self.stream=stream
-            _check_cancel(self.cancel)
-            def collect():
-                while not self.cancel.is_set():
-                    try:self.audio.append(self.frames.get(timeout=.1))
-                    except queue.Empty:
-                        if self.closed:return
-            self.thread=threading.Thread(target=collect,name='MurMur-offline-audio',daemon=True)
-            self.thread.start();_check_cancel(self.cancel)
-            self.started=time.monotonic();stream.start();_check_cancel(self.cancel)
+            _check_cancel(self.cancel);self.capture.check()
+            self.capture.activate()
+            self.thread=self.capture._worker
+        except BaseException:
+            self.capture.abort()
+            raise
         finally:self._start_finished.set()
+
+    def request_stop(self):
+        self.capture.request_stop()
 
     def stop(self):
         with self._lock:
@@ -319,18 +316,16 @@ class OfflineRecorder:
             return self.raw
         try:
             _check_cancel(self.cancel)
+            self.capture.request_stop()
             if not self._start_finished.wait(30):raise RuntimeError('The offline model is still loading. Try again shortly.')
-            with self._lock:stream=self.stream;self.stream=None
-            if stream:stream.stop();stream.close()
-            self.closed=True
-            if self.thread:
-                self.thread.join(5)
-                if self.thread.is_alive():raise RuntimeError('Offline audio capture did not finish. Try again.')
+            pcm=self.capture.stop();self.closed=True
             _check_cancel(self.cancel)
             if self.error:raise RuntimeError(self.error)
+            prepared=require_speech(pcm,self.cfg)
+            self.audio_quality=prepared.metadata
             def partial(text):
                 _check_cancel(self.cancel);self.raw=text;self.partial(text)
-            self.raw=transcribe_pcm(b''.join(self.audio),self.cfg,self.cancel,self.recognizer,partial)
+            self.raw=transcribe_pcm(prepared.pcm,self.cfg,self.cancel,self.recognizer,partial)
             _check_cancel(self.cancel)
             if not self.cfg.get('save_audio'):self.audio.clear()
             return self.raw
@@ -339,7 +334,7 @@ class OfflineRecorder:
         finally:self._stop_finished.set()
 
     def abort(self):
-        self.cancel.set()
+        self.cancel.set();self.capture.abort()
         with self._lock:
             self.closed=True;self.duration=self.recorded_frames/SAMPLE_RATE
             if self._cleanup_started:return

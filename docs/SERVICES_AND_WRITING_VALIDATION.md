@@ -1,6 +1,6 @@
 # Services and written dictation validation · 2026-10-04
 
-This record describes the current source revision. Older validation sections
+This record describes an earlier Services revision. Current evidence is in [0.4.4 validation](RELEASE_0.4.4.md). Older validation sections
 describe their respective revisions rather than every subsequent change.
 
 ## Services layout

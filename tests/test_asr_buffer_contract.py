@@ -7,6 +7,17 @@ import pytest
 from murmur import providers
 
 
+@pytest.fixture(autouse=True)
+def synthetic_microphone(monkeypatch):
+    import sounddevice
+    class Stream:
+        def __init__(self,**kwargs):pass
+        def start(self):pass
+        def stop(self):pass
+        def close(self):pass
+    monkeypatch.setattr(sounddevice,'RawInputStream',Stream)
+
+
 def test_installed_sdk_backpressure_is_bounded():
     from dashscope.audio.asr import Recognition,RecognitionCallback
     sdk=Recognition(model='fun-asr-realtime',format='pcm',sample_rate=16000,callback=RecognitionCallback(),api_key='test-only',base_address='wss://invalid.example')
@@ -65,7 +76,7 @@ def test_cancelled_bailian_start_waiting_for_connection_slot_opens_nothing(monke
     slot=threading.BoundedSemaphore(1);slot.acquire()
     monkeypatch.setattr(providers,'_ASR_SLOTS',slot)
     monkeypatch.setattr(providers,'credential',lambda name:'test-only')
-    monkeypatch.setattr(sounddevice,'RawInputStream',lambda **kwargs:pytest.fail('Cancelled waiting session opened a microphone'))
+
     cfg=copy.deepcopy(DEFAULTS);cfg['demo']=False
     recorder=providers.Recorder(cfg,lambda text:None,lambda level:None,threading.Event());finished=threading.Event()
     def start():

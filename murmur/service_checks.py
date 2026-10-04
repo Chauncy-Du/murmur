@@ -320,6 +320,17 @@ def check_service(kind, cfg, secrets=None, cancel=None, usage_sink=None):
         model_metadata = None
         if kind in ('llm','ask'):summary, detail, usage, model_metadata = _llm(cfg, secrets or {}, cancel, capture_usage,kind)
         elif cfg.get('asr_backend', 'bailian') == 'offline':summary, detail = _offline(cfg, cancel)
+        elif cfg.get('asr_backend') in ('openai','groq','http_asr'):
+            from .cloud_asr import KEY_SLOTS, CloudAsrError, list_models, read_key
+            try:
+                key=read_key(cfg,_draft(KEY_SLOTS[cfg['asr_backend']],secrets or {}))
+                listed,count=list_models(cfg,key,cancel)
+            except CloudAsrError as exc:
+                raise _CheckError(exc.summary,exc.detail) from None
+            if not listed:
+                raise _CheckError('Model not listed','Authentication succeeded, but the configured model was not listed. Some services omit transcription models from /models; consult the provider documentation. No audio was recorded or sent, and transcription was not tested.')
+            summary='Model listed'
+            detail=f'Authentication accepted; configured model appears in a catalog of {count} models. No audio was recorded or sent. This check does not verify transcription quality or audio API access.'
         elif cfg.get('asr_backend', 'bailian') in ('bailian', 'ali_nls'):
             summary, detail = _cloud_asr(cfg, secrets or {}, cancel, cfg.get('asr_backend', 'bailian'))
         else:raise _CheckError('Unknown ASR backend', 'Choose a supported speech recognition provider.')

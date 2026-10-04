@@ -363,3 +363,121 @@ def test_overview_test_buttons_send_correct_current_draft_snapshot(window, kind)
     assert secrets['ask_llm'] == 'synthetic-ask-test-key'
     assert window.service_test_busy[kind] and not test.isEnabled()
     assert not window.store.path.exists()
+
+
+def test_unrelated_refresh_preserves_popup_keyboard_highlight_and_model_rows(window):
+    combo = window.services_model_choices['llm']
+    combo.setFocus(Qt.TabFocusReason)
+    combo.showPopup()
+    QTest.keyClick(combo.view(), Qt.Key_Down)
+    row = combo.view().currentIndex().row()
+    assert row != combo.currentIndex()
+    model = combo.model()
+    for _ in range(3):
+        window.update_settings_actions()
+    assert combo.view().currentIndex().row() == row
+    assert combo.model() is model
+    assert combo.view().isVisible()
+    QTest.keyClick(combo.view(), Qt.Key_Return)
+    assert window.fields['ollama_auto'].currentData() is False
+    assert window.fields['llm_model'].text() == 'qwen3.5:2b'
+    assert not window.store.path.exists()
+
+
+@pytest.mark.parametrize('kind', ('llm', 'ask'))
+def test_standard_deepseek_choice_is_not_duplicated_and_custom_model_stays_intact(window, kind):
+    if kind == 'llm':
+        window.llm_source.setCurrentIndex(window.llm_source.findData(False))
+        window.fields['ollama'].setCurrentIndex(window.fields['ollama'].findData(False))
+        window.fields['ollama_auto'].setCurrentIndex(window.fields['ollama_auto'].findData(False))
+    prefix = 'llm' if kind == 'llm' else 'ask_llm'
+    window.fields[prefix + '_url'].setText('https://api.deepseek.com/v1')
+    window.fields[prefix + '_model'].setText('deepseek-flash')
+    combo = window.services_model_choices[kind]
+    assert combo.currentData() == 'deepseek'
+    values = [combo.itemData(index) for index in range(combo.count())]
+    assert values.count('deepseek') == 1
+    assert ('online' if kind == 'llm' else 'custom') not in values
+    window.fields[prefix + '_model'].setText('synthetic-custom-model')
+    assert window.fields[prefix + '_model'].text() == 'synthetic-custom-model'
+    assert combo.currentData() == ('online' if kind == 'llm' else 'custom')
+    assert 'synthetic-custom-model' in combo.currentText()
+    assert not window.store.path.exists()
+
+
+@pytest.mark.parametrize('phase', ('录音', '识别', '整理'))
+def test_recording_and_processing_disable_both_test_surfaces_without_requesting(window, phase):
+    requests = []
+    window.service_test.connect(lambda *args: requests.append(args))
+    window.set_session_state(phase, '听写')
+    window.update_asr_fields()
+    for kind in ('asr', 'llm', 'ask'):
+        assert all(not controls[0].isEnabled() for controls in window.service_test_controls[kind])
+        assert all('Finish' in controls[0].toolTip() for controls in window.service_test_controls[kind])
+        assert window.services_advanced_buttons[kind].isEnabled()
+        window.show_service_settings(kind)
+        assert window.services_back_buttons[kind].isEnabled()
+        window.request_service_test(kind)
+        window.show_services_overview()
+    assert not requests
+    assert not any(window.service_test_busy.values())
+    window.set_session_state('idle', '听写')
+    assert all(controls[0].isEnabled() for group in window.service_test_controls.values() for controls in group)
+
+
+def test_download_locks_only_speech_test_and_recovers_on_completion(window):
+    requests = []
+    window.service_test.connect(lambda *args: requests.append(args))
+    window.set_offline_download_state(True)
+    assert all(not controls[0].isEnabled() for controls in window.service_test_controls['asr'])
+    assert all(controls[0].isEnabled() for kind in ('llm', 'ask') for controls in window.service_test_controls[kind])
+    window.request_service_test('asr')
+    assert not requests
+    window.set_offline_download_state(False)
+    assert all(controls[0].isEnabled() for controls in window.service_test_controls['asr'])
+
+
+@pytest.mark.parametrize('kind', ('llm', 'ask'))
+@pytest.mark.parametrize('url', ('https://API.deepseek.com/v1', 'https://api.deepseek.com/V1', 'https://proxy.example.invalid/deepseek/v1'))
+def test_same_named_model_on_custom_endpoint_keeps_full_custom_draft(window, kind, url):
+    if kind == 'llm':
+        window.llm_source.setCurrentIndex(window.llm_source.findData(False))
+        window.fields['ollama'].setCurrentIndex(window.fields['ollama'].findData(False))
+        window.fields['ollama_auto'].setCurrentIndex(window.fields['ollama_auto'].findData(False))
+    prefix = 'llm' if kind == 'llm' else 'ask_llm'
+    window.fields[prefix + '_url'].setText(url)
+    window.fields[prefix + '_model'].setText('deepseek-flash')
+    window.sync_service_selectors()
+    combo = window.services_model_choices[kind]
+    assert combo.currentData() == ('online' if kind == 'llm' else 'custom')
+    assert window.fields[prefix + '_url'].text() == url
+    assert window.fields[prefix + '_model'].text() == 'deepseek-flash'
+    assert combo.findData('deepseek') >= 0
+    assert not window.store.path.exists()
+
+
+@pytest.mark.parametrize('auto, protocol', ((True, False), (False, True), (True, True)))
+def test_nonstandard_deepseek_profile_flags_are_preserved_and_can_be_restored(window, auto, protocol):
+    window.llm_source.setCurrentIndex(window.llm_source.findData(False))
+    window.fields['ollama'].setCurrentIndex(window.fields['ollama'].findData(protocol))
+    window.fields['llm_url'].setText('https://api.deepseek.com/v1')
+    window.fields['llm_model'].setText('deepseek-flash')
+    window.fields['ollama_auto'].setCurrentIndex(window.fields['ollama_auto'].findData(auto))
+    window.sync_llm_source()
+    window.sync_service_selectors()
+    assert window.services_model_choices['llm'].currentData() == 'online'
+    assert window.fields['ollama'].currentData() is protocol
+    assert window.fields['ollama_auto'].currentData() is auto
+    window.llm_source.setCurrentIndex(window.llm_source.findData(True))
+    combo = window.services_model_choices['llm']
+    assert combo.findData('online') >= 0
+    combo.setCurrentIndex(combo.findData('online'))
+    assert window.fields['llm_url'].text() == 'https://api.deepseek.com/v1'
+    assert window.fields['llm_model'].text() == 'deepseek-flash'
+    assert window.fields['ollama'].currentData() is protocol
+    assert window.fields['ollama_auto'].currentData() is auto
+
+
+def test_sidebar_reads_shared_version(window):
+    from murmur.version import __version__
+    assert __version__ + ' · Stored locally' in [item.text() for item in window.main_sidebar.findChildren(QLabel)]

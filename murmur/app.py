@@ -15,6 +15,7 @@ from .providers import make_recorder as Recorder,transform,ask,AskResult
 from .local_llm import auto_enabled
 from .ui import Bubble,ResultBubble,Preview,STYLE,icon
 from .dashboard import MainWindow
+from .version import __version__
 from . import windows
 
 @dataclass
@@ -40,6 +41,7 @@ class Session:
     editor_context:str='selection'
     steps:tuple=()
     completed_steps:int=0
+    transcript_complete:bool=False
 
 class Bridge(QObject):
     message=Signal(str,str,object)
@@ -125,9 +127,9 @@ class Controller(QObject):
     @staticmethod
     def service_snapshot(kind,cfg,secrets):
         import hashlib,json
-        keys=('asr_backend','asr_model','asr_url','vocabulary_id','offline_engine','offline_model_dir','offline_language','offline_threads','offline_acceleration','ali_nls_url') if kind=='asr' else ('llm_url','llm_model','ollama','ollama_auto',*PRICE_KEYS)
+        keys=('asr_backend','asr_model','asr_url','vocabulary_id','offline_engine','offline_model_dir','offline_language','offline_threads','offline_acceleration','ali_nls_url','asr_http_url','asr_http_model','asr_http_language','asr_http_timeout') if kind=='asr' else ('llm_url','llm_model','ollama','ollama_auto',*PRICE_KEYS)
         if kind=='ask':keys=('ask_llm_url','ask_llm_model')
-        names=('asr','ali_appkey','ali_token') if kind=='asr' else ('ask_llm',) if kind=='ask' else ('llm',)
+        names=('asr','ali_appkey','ali_token','asr_openai_key','asr_groq_key','asr_http_key') if kind=='asr' else ('ask_llm',) if kind=='ask' else ('llm',)
         # Only a digest is retained for stale-result checks. Keys remain in the
         # worker's in-memory input and never enter diagnostics or storage.
         payload=[{key:cfg.get(key) for key in keys},{name:secrets.get(name,'') for name in names}]
@@ -272,7 +274,11 @@ class Controller(QObject):
         self.bubble.state('启动','Connecting…' if not s.cfg['demo'] else 'Starting demo recording',s.cfg['demo'])
         def work():
             try:
-                rec=Recorder(s.cfg,lambda text:self.bridge.message.emit(s.id,'partial',text),lambda level:self.bridge.message.emit(s.id,'level',level),s.cancel);s.recorder=rec;rec.start()
+                rec=Recorder(s.cfg,lambda text:self.bridge.message.emit(s.id,'partial',text),lambda level:self.bridge.message.emit(s.id,'level',level),s.cancel);s.recorder=rec
+                if s.phase=='等待停止':
+                    request_stop=getattr(rec,'request_stop',None)
+                    if request_stop:request_stop()
+                rec.start()
                 if s.cancel.is_set():rec.abort();return
                 self.bridge.message.emit(s.id,'started',None)
             except Exception as e:
@@ -282,7 +288,11 @@ class Controller(QObject):
     def stop(self):
         s=self.session
         if not s or s.phase not in ('启动','录音'):return
-        if s.phase=='启动':s.phase='等待停止';self.bubble.state('等待停止','Finishing startup',s.cfg['demo']);self.sync_controls();return
+        if s.phase=='启动':
+            s.phase='等待停止'
+            request_stop=getattr(s.recorder,'request_stop',None)
+            if request_stop:request_stop()
+            self.bubble.state('等待停止','Finishing startup',s.cfg['demo']);self.sync_controls();return
         s.phase='识别';s.stopped=time.monotonic();self.bubble.state('识别','Finishing transcription',s.cfg['demo'])
         self.update_progress(s)
         self.sync_controls()
@@ -314,10 +324,17 @@ class Controller(QObject):
             if wait:self.stop()
             else:
                 self.bubble.state('录音','Right Alt to finish Ask Anything' if s.assistant else 'Release to finish' if s.cfg['trigger']=='hold' else 'Click again to finish',s.cfg['demo']);self.sync_controls()
-        elif event=='partial':s.raw=payload
+        elif event=='partial':
+            # A recorder callback already queued at stop can arrive after the
+            # complete transcript. Preserve that final text for history/recovery.
+            if not s.transcript_complete and isinstance(payload,str) and payload.strip():s.raw=payload
         elif event=='level' and s.phase in ('启动','录音','等待停止'):
+            if s.phase=='启动' and not s.cfg['demo'] and not self.bubble.wave.active:
+                self.bubble.state('录音','Microphone active · preparing speech service',False)
             self.bubble.wave.feed_level(payload)
         elif event=='recognized':
+            if s.transcript_complete or not isinstance(payload,str) or not payload.strip():return
+            s.transcript_complete=True
             s.raw=payload
             if isinstance(payload,str) and payload.strip():
                 if not s.steps:self.configure_progress(s)
@@ -348,9 +365,9 @@ class Controller(QObject):
         if s.recorder:
             if error:s.recorder.abort()
             s.duration=s.recorder.duration
-        # Abort freezes any last partial sentence into recorder.raw. Read it
-        # afterwards so a device/network failure cannot hide that original.
-        raw=(s.recorder.raw if error and s.recorder else '') or s.raw or (s.recorder.raw if s.recorder else '')
+        # Before final recognition, abort freezes the latest partial sentence.
+        # Afterwards, the complete transcript remains the authoritative original.
+        raw=s.raw if s.transcript_complete else (s.recorder.raw if error and s.recorder else '') or s.raw or (s.recorder.raw if s.recorder else '')
         final=raw if error else payload
         latency=max(0,time.monotonic()-(s.stopped or time.monotonic()))
         audio=''
@@ -407,7 +424,7 @@ class Controller(QObject):
         if s.recorder:
             if error:s.recorder.abort()
             s.duration=s.recorder.duration
-        raw=(s.recorder.raw if error and s.recorder else '') or s.raw
+        raw=s.raw if s.transcript_complete else (s.recorder.raw if error and s.recorder else '') or s.raw
         context=s.context.text if s.context else ''
         if not error and (not isinstance(payload,AskResult) or payload.action not in ('replace','insert','answer') or not isinstance(payload.text,str) or not payload.text.strip()):
             payload='The assistant returned an invalid action. Your spoken request is preserved.';error=True
@@ -471,10 +488,16 @@ class Controller(QObject):
             if not self.quitting and attempt<3:
                 if self.clip_tx is None:self.clip_tx=tx
                 QTimer.singleShot(120,lambda:self.restore_clipboard(tx,expected,attempt+1));return
-            self.bubble.state('失败','Clipboard restoration failed. Copy your result manually.',self.store.config['demo'])
+            self.clipboard_restore_failed()
         except Exception:
-            self.bubble.state('失败','Clipboard restoration failed. Copy your result manually.',self.store.config['demo'])
+            self.clipboard_restore_failed()
         if self.clip_tx is tx:self.clip_tx=None
+    def clipboard_restore_failed(self):
+        message='Clipboard restoration failed. Your result remains available to copy.'
+        self.window.home_status.setText(message)
+        # The delayed restore belongs to an earlier paste. It must not hide or
+        # reset a newer session's live waveform, processing step, or percentage.
+        if self.session is None:self.bubble.state('失败',message,self.store.config['demo'])
     def physical_input(self,kind):
         self.input_epoch+=1
         if self.session:self.session.focus_changed=True
@@ -487,7 +510,7 @@ class Controller(QObject):
         if s:
             s.cancel.set()
             if s.recorder:s.recorder.abort();s.duration=s.recorder.duration
-            raw=(s.recorder.raw if s.recorder else '') or s.raw
+            raw=s.raw if s.transcript_complete else (s.recorder.raw if s.recorder else '') or s.raw
             if raw:history_saved=self._save_history(s.id,s.mode,raw,raw,s.duration,0,s.cfg['demo'],'Cancelled by user',context=s.context.text if s.assistant and s.context else '')
         self.session=None
         if s and raw and history_saved:self.window.refresh()
@@ -577,12 +600,18 @@ class Controller(QObject):
                 if not math.isfinite(price) or not 0<=price<=1000000:raise ValueError('Token prices must be non-negative USD per million tokens.')
                 values[key]=price
             if values['translation_key']==values['selection_key']!='disabled':raise ValueError('Translation and selection shortcuts must be different.')
-            endpoint=values.get('ali_nls_url','') if values.get('asr_backend')=='ali_nls' else values['asr_url']
-            if values.get('asr_backend')!='offline' and urlparse(endpoint).scheme!='wss':raise ValueError('ASR URL must use wss://.')
+            backend=values.get('asr_backend','offline')
+            if backend in ('openai','groq','http_asr'):
+                from .cloud_asr import request_settings
+                request_settings(values)
+            elif backend!='offline':
+                endpoint=values.get('ali_nls_url','') if backend=='ali_nls' else values['asr_url']
+                if urlparse(endpoint).scheme!='wss':raise ValueError('ASR URL must use wss://.')
             if urlparse(values['llm_url']).scheme not in ('http','https'):raise ValueError('LLM URL must use http:// or https://.')
             from .assistant import ask_config
             ask_config(values)
-            if not values['asr_model'] or (not values['llm_model'] and not auto_enabled(values)):raise ValueError('Model names cannot be empty.')
+            if backend=='bailian' and not values['asr_model']:raise ValueError('Speech model cannot be empty.')
+            if not values['llm_model'] and not auto_enabled(values):raise ValueError('LLM model cannot be empty.')
             with credential_lock:
                 for name,key in secrets.items():
                     if key:
@@ -590,12 +619,14 @@ class Controller(QObject):
                         if name=='ali_token':credential('ali_token_expiry','')
             if values['startup']!=self.store.config['startup']:windows.startup(values['startup'])
             self.store.config.update(values);self.store.save();self.store.prune();self.keys.machine.cfg=self.store.config;self.bubble.cfg=self.store.config;self.bubble.position();self.result_bubble.cfg=self.store.config;self.result_bubble.position();self.window.refresh()
-            for field in ('asr_key','llm_key','ask_llm_key','ali_appkey','ali_token'):
+            for field in ('asr_key','llm_key','ask_llm_key','ali_appkey','ali_token','asr_http_key'):
                 widget=getattr(self.window,field,None)
                 if widget is not None:
                     previous=widget.blockSignals(True)
                     try:widget.clear()
                     finally:widget.blockSignals(previous)
+            if hasattr(self.window,'_http_asr_keys'):
+                self.window._http_asr_keys={key:'' for key in self.window._http_asr_keys}
             self.bubble.state('待机','Changes saved',values['demo']);self.window.settings_status.setText('Changes saved')
         except Exception as e:QMessageBox.warning(self.window,'Could not save settings',str(e))
     def quit(self):
@@ -630,7 +661,7 @@ def main():
             pcm=audio.readframes(audio.getnframes())
         result=transcribe_pcm(pcm,cfg)
         Path(args.output_file).write_text(result,'utf-8');return 0
-    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('MurMur');app.setQuitOnLastWindowClosed(False);app.setStyleSheet(STYLE)
+    app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('MurMur');app.setApplicationVersion(__version__);app.setQuitOnLastWindowClosed(False);app.setStyleSheet(STYLE)
     from PySide6.QtGui import QPalette,QColor
     palette=QPalette()
     for role,color in [(QPalette.Window,'#202022'),(QPalette.WindowText,'#ececf0'),(QPalette.Base,'#29292d'),(QPalette.Text,'#ececf0'),(QPalette.Button,'#333337'),(QPalette.ButtonText,'#ececf0'),(QPalette.Highlight,'#aaa0e1'),(QPalette.HighlightedText,'#202022')]:palette.setColor(role,QColor(color))

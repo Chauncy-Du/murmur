@@ -32,12 +32,12 @@ def client(body,status=200,seen=None):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def test_auto_orders_by_parameter_count_and_skips_cloud_embedding_and_remote():
+def test_auto_prefers_rewriting_band_and_skips_cloud_embedding_and_remote():
     seen=[]
     models=[item('qwen:4b','4B',1),item('qwen3.5:2b','2.3B'),item('embedding:tiny','.1B'),
         item('qwen:cloud','.1B'),item('proxy-model','.1B',remote_host='cloud.invalid'),item('qwen:9b','9B')]
     with client(dict(models=models),seen=seen) as c:
-        assert resolve_model(c,config())=='qwen3.5:2b'
+        assert resolve_model(c,config())=='qwen:4b'
     assert str(seen[0].url)=='http://127.0.0.1:11434/api/tags'
     assert len(seen)==1 and seen[0].method=='GET' and not seen[0].content
 
@@ -84,15 +84,15 @@ def test_actual_selected_model_sent_and_usage_returned(operation,monkeypatch):
     seen=[];usage=[];original=httpx.Client
     def handler(request):
         seen.append(request)
-        if request.method=='GET':return httpx.Response(200,json=dict(models=[item('chosen:2b')]))
-        assert json.loads(request.content)['model']=='chosen:2b'
+        if request.method=='GET':return httpx.Response(200,json=dict(models=[item('small:2b'),item('chosen:4b','4B')]))
+        assert json.loads(request.content)['model']=='chosen:4b'
         return httpx.Response(200,json=dict(choices=[dict(message=dict(content='OK'))],usage=dict(prompt_tokens=8,completion_tokens=1,total_tokens=9)))
     monkeypatch.setattr(httpx,'Client',lambda **kwargs:original(transport=httpx.MockTransport(handler),**kwargs))
     monkeypatch.setattr(providers,'credential',lambda name:pytest.fail('Local model used credentials'))
     if operation=='transform':assert providers.transform('Public fixture','听写',config(),usage_sink=usage.append)=='OK'
     else:assert service_checks.check_service('llm',config(),usage_sink=usage.append)['success']
     assert len(seen)==2 and len(usage)==1
-    assert usage[0]['model']=='chosen:2b' and usage[0]['local'] and usage[0]['total_tokens']==9
+    assert usage[0]['model']=='chosen:4b' and usage[0]['local'] and usage[0]['total_tokens']==9
 
 
 def test_new_defaults_local_auto_and_saved_explicit_model_remains_explicit(tmp_path):
@@ -112,7 +112,7 @@ def test_generic_local_auto_uses_standard_models_and_ranked_parameter_ids():
         compatible_model('nomic-embed-text'),compatible_model('qwen3.5:cloud'),
         compatible_model('remote-tiny',remote_model='cloud-name'),compatible_model('qwen3.5:9b')]
     cfg=config(ollama=False,llm_url='http://localhost:1234/v1',llm_model='')
-    with client(dict(data=models),seen=seen) as c:assert resolve_model(c,cfg)=='Qwen/Qwen3.5-2B'
+    with client(dict(data=models),seen=seen) as c:assert resolve_model(c,cfg)=='qwen3.5:4b'
     assert str(seen[0].url)=='http://localhost:1234/v1/models'
     assert seen[0].headers['Authorization']=='Bearer local' and len(seen)==1
 
