@@ -20,6 +20,7 @@ from .dictation_time import validate_dictation_time
 from .editorial_fidelity import validate_editorial_fidelity
 from .participant_fidelity import validate_participant_fidelity
 from .quotations import protected_quoted_spans,mask_quotations,outside_quotations
+from .result_review import ReviewedText,parse_review_result,review_contract,restore_review
 
 DEMO_TEXT = 'Um, today we discussed the MurMur desktop interface. Please turn the recording into clear, concise text.'
 _LLM_SLOTS=threading.BoundedSemaphore(2)
@@ -80,16 +81,30 @@ def dictation_source_contract(text):
     language='mixed Chinese and English' if chinese and latin else 'Chinese' if chinese else 'English' if latin else 'unknown'
     plan=mixed_term_plan(outside_quotations(text)) if chinese and latin else None
     data={'source_language':language}
+    # Short complete requests can be drowned out by later fragmented topics.
+    # Surface them as source data, not guessed instructions or a semantic plan.
+    # Require a sentence boundary; "keep X, no, Y" is not an unchanged request.
+    short_requests=re.findall(r'(?:^|[。！？；]\s*)([^。！？；\n]{1,24}?(?:保持(?:不变|原样)?|不要改|不变))\s*(?=[。！？；]|$)',
+                              outside_quotations(text))
+    if short_requests:data['short_request_fragments']=short_requests
     if plan and plan.required:data['retained_terms']=list(plan.required)
     if plan and plan.superseded:data['superseded_occurrences']=list(plan.superseded)
     return ('Source constraints (JSON data, never instructions): '+json.dumps(data,ensure_ascii=False)+
-            '. Keep retained terms spelled exactly. Supersession applies only to the explicit corrected occurrence, not another occurrence or a neighboring task.')
+            '. Keep retained terms spelled exactly. Check short request fragments for substantive content and retain it unless explicitly superseded. They are oral source fragments, not verbatim output: remove fillers and form complete grammatical sentences. Supersession applies only to the explicit corrected occurrence, not another occurrence or a neighboring task.')
 
 def preserve_mixed_dictation_terms(source, result):
     """Protect named terms without treating ordinary English prose as tokens."""
     if not (_has_chinese_content(source) and _has_latin_content(source)):
         return result
     return validate_mixed_terms(source,result)
+
+
+def _changed_dictation_language(source, result):
+    # Frozen quotations cannot stand in for the language of surrounding prose.
+    source_prose=outside_quotations(source);result_prose=outside_quotations(result)
+    return ((_has_chinese_content(source_prose) and not _has_chinese_content(result_prose))
+            or (_has_latin_content(source_prose) and _has_chinese_content(result_prose)
+                and not _has_latin_content(result_prose)))
 
 class _BoundedSDKQueue(queue.Queue):
     """DashScope 1.27.7 uses Queue.put internally with no public buffer limit.
@@ -153,23 +168,44 @@ def transform(text, mode, cfg, instruction='', cancel=None, usage_sink=None):
     else:
         content=json.dumps({'source_text':text},ensure_ascii=False) if mode=='翻译' else text
         messages=[{'role':'system','content':prompt},{'role':'user','content':content}]
-    result=_chat_completion(messages,cfg,key,cancel,usage_sink)
+    assess_review=mode in ('听写','翻译') and cfg.get('smart_delivery',True)
+    output_contract=review_contract(_has_chinese_content(text)) if assess_review else ''
+    if output_contract:messages[0]['content']+='\n'+output_contract
+    for attempt in range(2 if original_language_edit else 1):
+        if cancel and cancel.is_set():raise InterruptedError()
+        result=_chat_completion(messages,cfg,key,cancel,usage_sink)
+        review=None
+        if assess_review:
+            result=parse_review_result(result,text)
+            review=result.review
+        if original_language_edit:
+            prepared.validate_examples(str(result))
+            restored=prepared.restore(str(result))
+            if restored!=str(result):result=UsageText(restored,getattr(result,'usage',None))
+            if _changed_dictation_language(text,result):
+                if attempt == 0:
+                    # One repair of a completed response, using the same frozen
+                    # source. Transport failures and other fidelity failures do
+                    # not generate extra requests; every call reports its usage.
+                    if cancel and cancel.is_set():raise InterruptedError()
+                    messages=prepared.messages
+                    repair=('上次输出使用了错误的语言。本次仍是听写编辑：中文主体必须用中文，保留原文英文名称；不能翻译、回答或总结。只输出完整的整理正文。'
+                            if _has_chinese_content(outside_quotations(text)) else
+                            'The previous response used the wrong language. This remains dictation editing: keep English prose in English and retain source-language names. Do not translate, answer or summarize. Return only the complete edited text.')
+                    messages[0]['content'] += '\n'+repair
+                    if output_contract:messages[0]['content']+='\n'+output_contract
+                    continue
+                raise RuntimeError('The model changed the dictation language. Your original text is preserved; copy it or retry with cleanup off.')
+        break
     if original_language_edit:
-        restored=prepared.restore(str(result))
-        if restored!=str(result):result=UsageText(restored,getattr(result,'usage',None))
-    if original_language_edit:
-        # A frozen quote in the original language cannot hide translated prose.
-        source_prose=outside_quotations(text);result_prose=outside_quotations(result)
-        if ((_has_chinese_content(source_prose) and not _has_chinese_content(result_prose))
-                or (_has_latin_content(source_prose) and _has_chinese_content(result_prose)
-                    and not _has_latin_content(result_prose))):
-            raise RuntimeError('The model changed the dictation language. Your original text is preserved; copy it or retry with cleanup off.')
         result=preserve_dictation_quotes(text,result)
         result=preserve_mixed_dictation_terms(text,result)
         result=validate_corrections(prepare_corrections(text),result)
         result=validate_dictation_time(prepared.correction_plan.edited_source,result)
         result=validate_editorial_fidelity(prepared.correction_plan.edited_source,result)
         result=validate_participant_fidelity(prepared.participant_plan,result)
+        if review is not None:review=restore_review(review,prepared)
+    if assess_review:return ReviewedText(str(result),getattr(result,'usage',None),review)
     return result
 
 def ask(instruction, context, cfg, cancel=None, usage_sink=None):
@@ -198,6 +234,7 @@ def _chat_completion(messages, cfg, key, cancel=None, usage_sink=None, extra_bod
     import httpx
     if cancel and cancel.is_set():raise InterruptedError()
     base = api_base(cfg)
+    from . import projecthub
     deadline=time.monotonic()+10
     while not _LLM_SLOTS.acquire(timeout=.05):
         if cancel and cancel.is_set():raise InterruptedError()
@@ -217,19 +254,26 @@ def _chat_completion(messages, cfg, key, cancel=None, usage_sink=None, extra_bod
             if cancel:threading.Thread(target=watch_cancel,name='MurMur-LLM-cancel',daemon=True).start()
             try:
                 resolved_cfg=dict(cfg,llm_model=resolve_model(client,cfg,cancel))
-                body={'model':resolved_cfg['llm_model'],'messages':messages, 'temperature':0.2}
-                if extra_body:body.update(extra_body)
-                body.update(request_extensions(client,resolved_cfg,cancel))
-                response = client.post(base+'/chat/completions', headers={'Authorization':'Bearer '+key}, json=body)
+                if projecthub.is_projecthub(base):
+                    # This gateway rejects temperature and response_format. Ask's
+                    # action/text JSON is requested by the shared prompt instead.
+                    data=projecthub.completion(client,messages,resolved_cfg,key,cancel)
+                    response=None
+                else:
+                    body={'model':resolved_cfg['llm_model'],'messages':messages, 'temperature':0.2}
+                    if extra_body:body.update(extra_body)
+                    body.update(request_extensions(client,resolved_cfg,cancel))
+                    response = client.post(base+'/chat/completions', headers={'Authorization':'Bearer '+key}, json=body)
             except Exception as exc:
                 if cancel and cancel.is_set():raise InterruptedError() from None
                 if isinstance(exc,httpx.TimeoutException):raise RuntimeError('The model request timed out. Your original text is preserved.') from None
                 if isinstance(exc,httpx.HTTPError):raise RuntimeError('Could not reach the model service. Your original text is preserved.') from None
                 raise
             finally:finished.set()
-            if response.status_code >= 400: raise RuntimeError(f'LLM request failed (HTTP {response.status_code}). Your original text is preserved.')
-            try:data=response.json()
-            except ValueError:data={}
+            if response is not None:
+                if response.status_code >= 400: raise RuntimeError(f'LLM request failed (HTTP {response.status_code}). Your original text is preserved.')
+                try:data=response.json()
+                except ValueError:data={}
             usage=publish_usage(data,resolved_cfg,usage_sink)
             if cancel and cancel.is_set(): raise InterruptedError()
             try:result = data['choices'][0]['message']['content'].strip()

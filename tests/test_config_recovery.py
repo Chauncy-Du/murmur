@@ -15,9 +15,9 @@ def test_invalid_json_recovers_backup_without_losing_history(tmp_path):
 def test_invalid_fields_fall_back_to_safe_defaults(tmp_path):
     (tmp_path/'settings.json').write_text(json.dumps({'retention':-1,'demo':'false','bubble_width':900,'hotwords':None,'prompts':[]}),'utf-8')
     s=Store(tmp_path)
-    assert s.config['retention']==90
+    assert s.config['retention']==0
     assert s.config['demo'] is False
-    assert s.config['bubble_width']==168
+    assert s.config['bubble_width']==224
     assert isinstance(s.config['hotwords'],str)
     assert isinstance(s.config['prompts'],dict)
 

@@ -19,7 +19,7 @@ Existing portable build scripts are development tooling, not the future release 
 
 ## Current source snapshot
 
-**The current v0.4.5 upload is a source-only snapshot on `main`.** This upload does not create a GitHub Release or attach an installer, EXE or portable ZIP. It does not change the future minor-version installer requirement.
+**The current v0.4.6 upload is a source-only snapshot on `main`.** This upload does not create a GitHub Release or attach an installer, EXE or portable ZIP. It does not change the future minor-version installer requirement.
 
 ## 中文说明
 
@@ -27,4 +27,4 @@ Existing portable build scripts are development tooling, not the future release 
 - `0.x.y`（`y > 0`）为 Beta，例如 `v0.4.1`；在 GitHub 勾选 Pre-release，只说明更新内容，不上传安装包或便携 EXE。
 - 安装包应为 setup `.exe` 或 `.msi`，支持安装、升级和卸载；不能用直接运行的 EXE 或便携 ZIP 代替。
 - 发布说明必须对应已提交的实际改动，注明已知限制。GitHub 自动生成的源码归档不属于安装包。
-- 当前 `v0.4.5` 仅将源码快照上传到 `main`，不创建 GitHub Release，不附加安装包、EXE 或便携 ZIP；后续阶段版本的安装包要求仍保留。现有便携构建脚本不代表安装包已经实现，组织安全阻挡仍需处理。
+- 当前 `v0.4.6` 仅将源码快照上传到 `main`，不创建 GitHub Release，不附加安装包、EXE 或便携 ZIP；后续阶段版本的安装包要求仍保留。现有便携构建脚本不代表安装包已经实现，组织安全阻挡仍需处理。

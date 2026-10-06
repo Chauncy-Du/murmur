@@ -64,6 +64,7 @@ def test_short_visible_status_retains_full_tooltip_and_copy_resets_both(monkeypa
     copied = []
     class Clipboard:
         def setText(self, text): copied.append(text)
+        def text(self): return copied[-1] if copied else ''
     monkeypatch.setattr(QApplication, 'clipboard', lambda: Clipboard())
     widget = ResultBubble({})
     try:
@@ -71,7 +72,8 @@ def test_short_visible_status_retains_full_tooltip_and_copy_resets_both(monkeypa
         widget.show_result('Synthetic full output', demo=True, status=full_status, status_summary='Ask Anything · Preview only')
         assert widget.status.text() == 'Demo · Ask Anything · Preview only'
         assert widget.status.toolTip() == 'Demo · ' + full_status
-        assert widget.width() == 360 and widget.height() <= 180
+        widget.motion.stop_enter()
+        assert widget.width() == 400 and widget.height() <= 280
         widget.copy_result()
         assert copied == ['Synthetic full output']
         assert widget.status.text() == widget.status.toolTip() == 'Demo · Copied to clipboard'
@@ -102,6 +104,7 @@ def test_error_preserves_raw_for_explicit_copy_and_edit_only(monkeypatch):
     copied, edited = [], []
     class Clipboard:
         def setText(self, text): copied.append(text)
+        def text(self):return copied[-1] if copied else ''
     monkeypatch.setattr(QApplication, 'clipboard', lambda: Clipboard())
     widget = ResultBubble({})
     widget.edit_requested.connect(edited.append)
@@ -110,7 +113,8 @@ def test_error_preserves_raw_for_explicit_copy_and_edit_only(monkeypatch):
         message = 'Synthetic connection timeout. <b>Literal diagnostics.</b>'
         widget.show_error(message, raw, status='Transcription failed')
         QApplication.processEvents()
-        assert widget.isVisible() and widget.width() == 360 and widget.height() <= 180
+        widget.motion.stop_enter()
+        assert widget.isVisible() and widget.width() == 400 and widget.height() <= 280
         assert widget.text == raw and copied == [] and edited == []
         assert message in widget.preview.toPlainText()
         assert raw in widget.preview.toPlainText()

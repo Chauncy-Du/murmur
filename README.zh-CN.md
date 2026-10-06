@@ -4,7 +4,7 @@
 
 **轻巧的 Windows 语音助手，让听写、翻译与文字编辑融入日常工作。**
 
-[![Version](https://img.shields.io/badge/version-0.4.5-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.6-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#快速开始)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@
 
 全新配置默认使用本机 SenseVoice 语音识别，并关闭 Demo。也可选择 Paraformer、Fun-ASR-Nano、Qwen3-ASR 或云端服务；文字处理可使用本机 Ollama 或 DeepSeek 等 OpenAI 兼容接口。通过预览与目标检查，决定哪些内容进入你的文档。
 
-> **项目状态：**当前 v0.4.5 为 Beta 迭代，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
+> **项目状态：**当前 v0.4.6 为 Beta 迭代，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
 
 ## 功能
 
@@ -35,7 +35,7 @@
 | **快捷键听写** | 点一次 Right Alt 或 F8 开始录音，再点一次结束；设置中仍可选择按住模式。 |
 | **翻译与编辑** | 语音翻译；选区润色、翻译、总结、扩写及自定义编辑。 |
 | **本地或云端** | 四种离线语音模型、DirectML / Vulkan 显卡加速、DashScope 百炼、Alibaba Speech NLS，以及本地或在线文字模型。 |
-| **悬浮胶囊** | 默认 168 × 36，启动、录音、转录和润色时持续显示；真实音量波形切换为进度条，完成后展开成可复制的结果气泡。 |
+| **悬浮胶囊** | 默认 224 × 44，放大的对勾与关闭按钮；出现、状态切换、展开和消失都有可配置动效，清楚且确认输入的结果安静收起。 |
 | **个人词典** | 热词、字面替换规则，以及带历史原文依据的本地词汇建议。 |
 | **洞察与历史** | 活动日历、搜索、JSON/CSV 导出及可配置保留期限。 |
 | **统一配置** | 服务预设、高级参数、快捷键检查和独立语音/文字连接测试。 |
@@ -102,7 +102,9 @@ Set-Location 'D:\LocalProjects\MurMur'
 
 可在设置中修改快捷键及按住/切换模式。其他应用占用 Alt + Space 时，可改为 **Ctrl + Shift + Space**。禁用听写快捷键也会禁用 F8；仍可通过 **Home → Record to preview** 开始录音。
 
-**Record to preview** 完成后显示紧凑结果气泡。成功的真实听写/翻译默认将最终文本写入剪贴板；Demo 需手动 Copy。点击 **Edit** 打开编辑器，**Dismiss** 关闭结果。选区编辑也先预览，点击 **Replace** 时再次核对原目标与选区。
+**Settings → General → Show results only when needed** 默认开启。真实听写/翻译没有待复核的措辞、目标输入框仍有效且确认完整输入后，安静结束，不弹结果气泡。存在疑词、没有可输入的位置或无法确认输入成功时，显示气泡供 **Edit** 编辑或 **Copy** 复制；确认复制成功后气泡自动关闭，从结果编辑器复制成功也会关闭编辑器。原始识别与最终正文仍保存在 History。**Record to preview** 和 Demo 保留预览；关闭该开关可恢复每次显示结果的行为。选区编辑先预览，点击 **Replace** 时再次核对原目标与选区。
+
+**Settings → Appearance** 可配置屏幕与八种锚点、边距、胶囊宽高、结果宽度，以及鼠标跟随和鼠标间距。跟随使用鼠标所在屏幕，靠近边缘时换到另一侧；鼠标进入气泡后暂停移动，方便点击。默认固定在屏幕下方。出现和消失可选 **Pop / Slide / Fade / None**，状态过渡与语音条动画可分别关闭，动效时长可调 120–500 ms。**Preview animation** 使用未保存的草稿播放模拟录音、处理和结果状态，不采集麦克风、不调用服务。保存后应用选择；旧的过窄尺寸升级为新默认，其他合法外观设置保留。
 
 ## 服务配置
 
@@ -184,7 +186,9 @@ Paraformer 目前没有独立标点模型，因此原始转写可能缺少标点
 
 2B / 4B / 9B 的场景建议是起步选择，不是实测速度或质量排名。已有 `qwen:latest`（4B）仍可在 **Specify model** 下继续使用；它不属于 Qwen3.5 预设，也不会被新预设提前选中。听写整理删除填充词、修正标点并保留原意。
 
-再次点击 Right Alt 停止录音后，胶囊持续显示实际处理步骤：开启整理的听写为 **Transcribe → Polish**，语音翻译为 **Transcribe → Translate**，选中文字操作只显示其实际编辑步骤。紫色填充覆盖整个胶囊背景，百分比按已完成步骤数计算；两步流程为 0%、50%，取得有效结果后为 100%。它不估计模型内部进度，也不会随计时循环前进。完成后用 240 ms 动效展开为结果气泡。真实听写/翻译结果默认写入剪贴板，**Copy** 复制全文、**Edit** 打开编辑器、**Dismiss** 关闭；演示结果仍需手动复制。取消和下一次录音会终止旧动效，旧回调不会重新弹出气泡。
+再次点击 Right Alt 停止录音后，胶囊将实际工作流节点与阶段内平滑估算进度结合显示。百分比属于估算，不是服务端模型进度；只有结果验证完成才到达 100%。各模式的阶段提示用于描述等待状态，不增加模型请求，详见[估算进度](docs/ESTIMATED_PROGRESS.md)。需要复核或手动复制时，胶囊用 240 ms 动效展开为结果气泡；**Copy** 复制全文并关闭气泡、**Edit** 打开编辑器、**Dismiss** 关闭。清楚且已确认输入的听写/翻译直接收起；取消和下一次录音会终止旧动效与旧输入确认回调。
+
+复核信息在同一次整理/翻译请求中返回，不额外调用模型、不修改已选择的模型。它表示模型发现的措辞、指代或纠错疑点，并非经校准的语音准确率。无法得到有效复核信息时保留正文供人工查看。支持的传统 Windows 输入框直接输入并保持剪贴板；其他可验证输入框使用现有粘贴流程。无法验证的输入框保留手动复制入口，复制前不会自动覆盖剪贴板。
 
 普通 Right Alt 听写将口语整理为清晰的书面表达：删除非语义填充词、无意重复和废弃开头，重组句子，并在原文已有层次时分段或列要点。明确的自我更正采用最后版本，包括术语和数值；保留真实的不确定性、否定、条件与观点，不把思考中的备选方案写成决定。中文仍是中文，中英混合保留应留下的英文术语；原有引文完整保留，原文中的问题或指令作为听写内容。关闭 **Refine dictated text** 时直接使用识别文本，仍可应用个人字面替换规则。
 
@@ -256,7 +260,7 @@ uv run murmur --offline-engine qwen_asr --offline-acceleration gpu --transcribe-
 | 存储与洞察 | [`storage.py`](murmur/storage.py)、[`insights.py`](murmur/insights.py) |
 | Windows 集成 | [`hotkeys.py`](murmur/hotkeys.py)、[`windows.py`](murmur/windows.py)、[`clipboard.py`](murmur/clipboard.py) |
 
-当前 **0.4.5 Beta** 为明确的第一人称“不确定／未确认／未决定”立场增加有限主体/状态保真检查，改善 compact-8 示例，并为 Services 控件提供对应模块的英文无障碍名称。已记录的冻结回归为 **1849 项通过**；6 条公开本地 4B 样例的人工质量评审为 5 条完整通过、1 条部分通过。“我希望”等偏好表达仍不在有限主体守卫范围内。改动、证据与限制见 [0.4.5 记录](docs/RELEASE_0.4.5.md)。
+此前 **0.4.5 Beta** 为明确的第一人称“不确定／未确认／未决定”立场增加有限主体/状态保真检查，改善 compact-8 示例，并为 Services 控件提供对应模块的英文无障碍名称。已记录的冻结回归为 **1849 项通过**；6 条公开本地 4B 样例的人工质量评审为 5 条完整通过、1 条部分通过。“我希望”等偏好表达仍不在有限主体守卫范围内。改动、证据与限制见 [0.4.5 记录](docs/RELEASE_0.4.5.md)。
 
 此前 **0.4.4 本地 Beta** 新增限定技术短语/星期关系冻结、Dictation与Refine共用恢复、风险提示示例，以及观测到的完成态与新增因果保护。Services的新测试结果优先于旧下载状态。实际4B稿件、失败、最终守卫回放和源码验证分别记录于 [0.4.4验证](docs/RELEASE_0.4.4.md)；采集、多ASR与提示词的来源映射见 [TypeFree九节拆解](docs/TYPEFREE_ANALYSIS.md)。既有真实SenseVoice受控音频检查属于上一版记录。真人麦克风/噪声、物理快捷键、跨应用焦点/上屏和云端音频仍需现场验证。
 
@@ -288,4 +292,4 @@ MurMur 源码采用 [MIT 许可证](LICENSE)。依赖及模型权重各自遵循
 
 此前迭代的设备关闭屏障、取消原文恢复、口误整理和公开模型质量限制见 [0.4.4 验证记录](docs/RELEASE_0.4.4.md)。
 
-当前本地 Beta：[0.4.5 改动与验证](docs/RELEASE_0.4.5.md)。
+当前 Beta：[0.4.6 改动与验证](docs/RELEASE_0.4.6.md)。

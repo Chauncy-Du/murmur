@@ -18,6 +18,8 @@ _FILES = {
     'deepseek': 'deepseek.svg',
     'openai': 'openai.svg',
     'ollama': 'ollama.svg',
+    'gemini': 'gemini.png',
+    'claude': 'claude.png',
     'sensevoice': 'sensevoice-neutral.svg',
     'paraformer': 'paraformer-neutral.svg',
     'funasr': 'funasr-neutral.svg',
@@ -40,6 +42,10 @@ def provider_icon_key(model_or_provider: str) -> str:
         return 'deepseek'
     if 'qwen' in value or 'qwq' in value:
         return 'qwen'
+    if re.search(r'(^|[/:-])gemini(?:[-\d:]|$)',value):
+        return 'gemini'
+    if re.search(r'(^|[/:-])(?:claude|anthropic)(?:[-\d:]|$)',value):
+        return 'claude'
     if 'sensevoice' in value or 'sense-voice' in value:
         return 'sensevoice'
     if 'paraformer' in value:

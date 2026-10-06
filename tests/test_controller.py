@@ -232,11 +232,11 @@ class MemoryClipboard:
     def text(self):return self.value
 
 
-def test_real_result_copies_and_uses_small_result_without_opening_editor(controller,monkeypatch):
+def test_real_result_without_target_waits_for_explicit_copy_and_edit(controller,monkeypatch):
     c=controller;clip=MemoryClipboard();monkeypatch.setattr(c.app,'clipboard',lambda:clip)
     s=Session('听写',dict(c.store.config,demo=False),None,raw='Original');c.session=s
     c.receive(s.id,'result','Final result')
-    assert clip.writes==['Final result']
+    assert clip.writes==[]
     assert c.result_bubble.isVisible() and not c.preview.isVisible() and not c.bubble.isVisible()
     assert c.result_bubble.text=='Final result'
     c.result_bubble.edit_button.click()
@@ -344,11 +344,11 @@ def test_second_alt_keeps_capsule_through_transcription_refinement_and_result(co
         assert not c.bubble.mic.isVisible() and not c.window.record_button.isEnabled()
         transcribed.set();wait_for(lambda:s.phase=='整理')
         assert c.bubble.isVisible() and c.bubble.progress.running
-        assert c.bubble.status.text()=='Polish' and s.raw=='Public sample'
+        assert c.bubble.status.text()=='Organize' and s.raw=='Public sample'
         assert c.bubble.progress.completed_steps==1 and c.bubble.progress.total_steps==2
         refined.set();wait_for(lambda:c.session is None)
         assert not c.bubble.isVisible() and c.result_bubble.isVisible()
-        assert c.result_bubble._morph is not None and clip.writes==['Public result']
+        assert c.result_bubble._morph is not None and clip.writes==[]
         c.cancel();QTest.qWait(280)
         assert not c.result_bubble.isVisible() and c.result_bubble._morph is None
     finally:transcribed.set();refined.set()

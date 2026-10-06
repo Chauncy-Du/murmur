@@ -24,6 +24,8 @@ def app():
     ('Paraformer INT8', 'paraformer'), ('fun_asr_nano', 'funasr'),
     ('FunASR', 'funasr'), ('bailian', 'cloud-speech'), ('ali_nls', 'cloud-speech'),
     ('deepseek-chat', 'deepseek'), ('DeepSeek-R1:8b', 'deepseek'),
+    ('gemini-3-6-flash','gemini'),('Google Gemini 3.6 Flash','gemini'),
+    ('claude-opus-4-8','claude'),('Claude Haiku 4.5','claude'),('Anthropic','claude'),
     ('OpenAI', 'openai'), ('gpt-4.1-mini', 'openai'), ('gpt-oss:20b', 'openai'),
     ('Ollama', 'ollama'), ('auto (local)', 'local'), ('auto', 'local'),
     ('Unspecified speech engine', 'speech'), ('offline', 'speech'),
@@ -34,7 +36,7 @@ def test_model_and_provider_identity(model, key):
 
 
 @pytest.mark.parametrize('key', [
-    'qwen', 'deepseek', 'openai', 'ollama', 'sensevoice', 'paraformer',
+    'qwen', 'deepseek', 'openai', 'ollama', 'gemini', 'claude', 'sensevoice', 'paraformer',
     'funasr', 'ali_nls', 'speech', 'local', 'unknown-model',
 ])
 def test_bundled_icons_are_visibly_rendered_without_network(app, key, monkeypatch):
@@ -79,7 +81,7 @@ def test_icons_remain_visible_on_actual_dark_surfaces(app):
     for background in ('#242428', '#252429'):
         base = QColor(background)
         base_luminance = luminance(base)
-        for key in ('qwen', 'deepseek', 'openai', 'ollama', 'sensevoice', 'paraformer', 'funasr', 'ali_nls', 'speech', 'local', 'custom'):
+        for key in ('qwen', 'deepseek', 'openai', 'ollama', 'gemini', 'claude', 'sensevoice', 'paraformer', 'funasr', 'ali_nls', 'speech', 'local', 'custom'):
             image = QImage(20, 20, QImage.Format.Format_ARGB32)
             image.fill(base)
             pixmap = provider_icon(key).pixmap(QSize(20, 20))

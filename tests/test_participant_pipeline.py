@@ -75,10 +75,11 @@ def test_source_bound_scope_is_sent_as_data_but_not_recorded_in_metadata():
     assert prepared.metadata['example_count']<=2
 
 
-def test_readable_mixed_example_keeps_individual_desire_distinct_from_group_action():
-    prepared=prepare_dictation_messages('', '我们讨论了 Scheduler 的配置。')
-    example=next(example for example in prepared.examples if example.id=='mixed-readable')
-    assert '我们讨论了' in example.result and '我希望' in example.result
+def test_ordinary_mixed_dictation_has_no_generic_sample_topic():
+    prepared=prepare_dictation_messages('', '我们讨论了 TaskRunner 的配置，我希望说明更清楚。')
+    assert prepared.examples==()
+    assert 'Scheduler' not in prepared.system_prompt and 'warning' not in prepared.system_prompt
+    assert prepared.restore(json.loads(prepared.messages[-1]['content'])['dictation'])==prepared.source
 
 
 def test_translation_has_its_own_semantics_without_participant_plan(monkeypatch,cfg):

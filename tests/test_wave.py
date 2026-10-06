@@ -120,7 +120,7 @@ def test_demo_is_explicit_and_switching_to_real_clears_simulation(audio_wave):
 
 def test_bubble_repeated_recording_state_preserves_audio_history():
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     bubble.wave.timer.stop()
     clock = Clock()
     bubble.wave._clock = clock
@@ -135,13 +135,13 @@ def test_bubble_repeated_recording_state_preserves_audio_history():
     bubble.state('录音', demo=True)
     assert 'Demo' in bubble.status.text()
     assert 'simulated waveform' in bubble.toolTip()
-    assert bubble.size().width() == 168 and bubble.size().height() == 36
+    assert bubble.size().width() == 224 and bubble.size().height() == 44
     bubble.hide()
 
 
 def test_bubble_lifecycle_keeps_processing_visible_without_audio_or_stop(monkeypatch):
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     bubble.wave.timer.stop()
     clock = Clock()
     bubble.wave._clock = clock
@@ -188,13 +188,13 @@ def test_bubble_lifecycle_keeps_processing_visible_without_audio_or_stop(monkeyp
     assert calls == ['show', 'hide', 'show', 'hide']
 
 
-@pytest.mark.parametrize('configured, expected', ((100, 156), (168, 168), (232, 180)))
+@pytest.mark.parametrize('configured, expected', ((100, 200), (224, 224), (400, 360)))
 def test_compact_bubble_clamps_size_and_exposes_truthful_demo(configured, expected):
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({'bubble_width': configured})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none','bubble_width': configured})
     bubble.state('录音', '00:02', demo=True)
     app.processEvents()
-    assert bubble.width() == expected and bubble.height() == 36
+    assert bubble.width() == expected and bubble.height() == 44
     assert bubble.mic.isVisible() and bubble.mic.isEnabled()
     assert 'Demo' in bubble.status.text() and 'Demo' in bubble.accessibleName()
     assert 'simulated waveform' in bubble.toolTip()
@@ -210,21 +210,23 @@ def test_compact_bubble_clamps_size_and_exposes_truthful_demo(configured, expect
 
 def test_processing_fallback_names_and_completed_step_percentage():
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     bubble.state('识别')
     assert bubble.status.text() == 'Transcribe'
     assert bubble.percentage.text() == '0%'
     bubble.state('整理')
-    assert bubble.status.text() == 'Polish'
+    assert bubble.status.text() == 'Organize'
     assert bubble.percentage.text() == '50%'
     assert bubble.progress.fraction == .5
     assert bubble.progress.animation.state() != QPropertyAnimation.Running
     bubble.state('完成')
 
 
-def test_progress_is_event_based_repeated_state_does_not_reset_or_advance():
+def test_estimated_progress_advances_without_changing_actual_completed_steps():
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
+    clock=Clock()
+    bubble.progress._clock=clock
     bubble.state('识别')
     bubble.set_progress('Translate', 1, 2)
     assert bubble.status.text() == 'Translate'
@@ -235,13 +237,19 @@ def test_progress_is_event_based_repeated_state_does_not_reset_or_advance():
     assert bubble.status.text() == 'Translate'
     assert bubble.progress.completed_steps == 1
     assert bubble.progress.total_steps == 2
-    QTest.qWait(240)
-    assert bubble.progress.display_fraction == .5
-    assert bubble.progress.animation.state() != QPropertyAnimation.Running
-    QTest.qWait(100)
-    assert bubble.progress.fraction == bubble.progress.display_fraction == .5
-    assert '1 of 2 (50%)' in bubble.toolTip()
-    assert 'model-internal' in bubble.accessibleName() or 'processing steps' in bubble.accessibleName()
+    clock.now=12
+    bubble.progress.tick()
+    first=bubble.progress.display_fraction
+    assert .5<first<.98
+    assert bubble.progress.fraction==.5
+    clock.now=30
+    bubble.state('整理')
+    bubble.set_progress('Translate',1,2)
+    bubble.progress.tick()
+    assert first<bubble.progress.display_fraction<.98
+    assert bubble.progress.completed_steps==1
+    assert '1 of 2' in bubble.toolTip() and 'Estimated progress' in bubble.toolTip()
+    assert 'Estimated progress' in bubble.accessibleName()
     bubble.state('待机')
     assert bubble.progress.fraction == 0
     assert not bubble.progress.running
@@ -253,14 +261,14 @@ def test_progress_is_event_based_repeated_state_does_not_reset_or_advance():
 @pytest.mark.parametrize('step', ('Transcribe', 'Polish', 'Translate', 'Respond', 'Refine', 'Summarize', 'Expand', 'Edit'))
 def test_processing_labels_fit_minimum_capsule_and_keep_cancel(step):
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({'bubble_width': 156})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none','bubble_width': 156})
     bubble.state('识别')
     bubble.set_progress(step, 1, 2)
     app.processEvents()
     assert bubble.status.fontMetrics().horizontalAdvance(step) <= bubble.status.width()
     assert bubble.status.geometry().right() < bubble.percentage.geometry().left()
     assert bubble.close.geometry().right() < bubble.status.geometry().left()
-    assert bubble.width() == 156 and bubble.height() == 36
+    assert bubble.width() == 200 and bubble.height() == 44
     assert not bubble.mic.isVisible()
     assert bubble.close.isEnabled()
     assert bubble.windowFlags() & Qt.WindowDoesNotAcceptFocus
@@ -274,7 +282,8 @@ def test_processing_labels_fit_minimum_capsule_and_keep_cancel(step):
 
 def test_fraction_clamps_and_fill_covers_capsule_height_under_content():
     app = QApplication.instance() or QApplication([])
-    bubble = Bubble({})
+    bubble = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
+    bubble.progress._clock=Clock()
     bubble.state('识别')
     bubble.set_progress('Transcribe', -5, 2)
     assert bubble.percentage.text() == '0%'
@@ -294,3 +303,33 @@ def test_fraction_clamps_and_fill_covers_capsule_height_under_content():
     assert not bubble.percentage.isVisible() and not bubble.progress.running
     assert bubble.progress.fraction == 0
     bubble.state('待机')
+
+
+@pytest.mark.parametrize('kind',('Translation','Ask Anything'))
+@pytest.mark.parametrize('width',(200,224,360))
+def test_advanced_recording_modes_show_distinct_icon_and_fit(kind,width):
+    app=QApplication.instance() or QApplication([])
+    bubble=Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none','bubble_width':width})
+    clock=Clock();bubble.wave._clock=clock;bubble.wave.timer.stop()
+    bubble.set_session_kind(kind)
+    bubble.state('录音','00:02')
+    bubble.wave.feed_level(.7)
+    app.processEvents()
+    assert bubble.mode_mark.isVisible() and not bubble.mode_mark.pixmap().isNull()
+    assert kind in bubble.accessibleName() and kind in bubble.toolTip()
+    assert bubble.wave.color!='#ddd3f6'
+    assert bubble.status.fontMetrics().horizontalAdvance('00:02')<=bubble.status.width()
+    assert bubble.close.geometry().right()<bubble.mode_mark.geometry().left()
+    assert bubble.wave.geometry().right()<bubble.status.geometry().left()
+    assert bubble.status.geometry().right()<bubble.mic.geometry().left()
+    levels=bubble.wave.display_levels()
+    bubble.set_session_kind(kind)
+    bubble.state('录音','00:03')
+    assert bubble.wave.display_levels()==levels
+    bubble.state('整理')
+    bubble.set_progress('Respond' if kind=='Ask Anything' else 'Translate',1,2)
+    app.processEvents()
+    assert bubble.mode_mark.isVisible() and bubble.close.isEnabled()
+    assert bubble.status.fontMetrics().horizontalAdvance(bubble.status.text())<=bubble.status.width()
+    bubble.state('待机');bubble.set_session_kind('')
+    assert not bubble.mode_mark.isVisible() and bubble.wave.color=='#ddd3f6'

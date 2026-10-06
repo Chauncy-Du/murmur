@@ -4,7 +4,7 @@
 
 **A compact Windows voice assistant for dictation, translation, and text editing.**
 
-[![Version](https://img.shields.io/badge/version-0.4.5-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.6-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@ MurMur turns two key presses into a short voice session: press to start, speak, 
 
 New profiles use local SenseVoice speech recognition with Demo mode off. You can also choose Paraformer, Fun-ASR-Nano, Qwen3-ASR or a cloud provider. Keep text processing local with Ollama, or use an OpenAI-compatible endpoint such as DeepSeek. Preview results and keep control over what reaches your documents.
 
-> **Project status:** v0.4.5 is the current Beta iteration; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
+> **Project status:** v0.4.6 is the current Beta iteration; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
 
 ## Features
 
@@ -35,7 +35,7 @@ New profiles use local SenseVoice speech recognition with Demo mode off. You can
 | **Dictation** | Press Right Alt or F8 once to start, then again to finish. Hold mode remains available in Settings. |
 | **Translation and editing** | Voice translation; selected-text polishing, translation, summarization, expansion, and custom editing. |
 | **Local or cloud** | Four offline speech models, DirectML / Vulkan GPU acceleration, DashScope, Alibaba Speech NLS, and local or online text models. |
-| **Floating capsule** | A 168 × 36 capsule stays visible through startup, recording and processing. Its background fills as workflow steps finish, with the current operation and percentage, then expands into a copyable result. |
+| **Floating capsule** | A 224 × 44 capsule with larger confirmation and close controls. Entry, state transitions, expansion and exit have configurable motion; clear confirmed delivery closes quietly. |
 | **Personal vocabulary** | Hotwords, literal replacement rules, and local term suggestions with examples from your history. |
 | **Activity and history** | Calendar insights, searchable history, JSON/CSV export, and configurable retention. |
 | **Service settings** | Provider presets, advanced options, shortcut checks, and separate speech/text connection tests. |
@@ -102,7 +102,13 @@ For fully local dictation, select **Local speech model · offline** and disable 
 
 Shortcuts and hold/toggle behavior are configurable. If another application uses Alt + Space, try **Ctrl + Shift + Space**. Disabling the dictation shortcut also disables F8; use **Home → Record to preview** to start recording.
 
-**Record to preview** shows the compact result bubble. The second Right Alt tap ends recording and keeps the capsule visible. Dictation shows **Transcribe → Polish** when refinement is enabled; voice translation shows **Transcribe → Translate**. The purple background and percentage represent completed workflow steps: for a two-step operation, 0%, 50%, then 100% after a valid result. They do not estimate model-internal work or advance on a timer. Selected-text actions display their actual single operation; Ask Anything uses **Respond** for its assistant request. When ready, the capsule expands into the result over 240 ms. Successful real dictation and translation copy the final text to the clipboard automatically; Demo requires manual Copy. Use **Edit** to open the editor, or **Dismiss** to close the result. Selection editing also starts with a preview; **Replace** rechecks the original target and selection before writing.
+**Settings → General → Show results only when needed** is enabled by default. Clear dictation and translation finish quietly after the original input target is rechecked and complete insertion is confirmed. Uncertain wording, an unavailable input target or unconfirmed insertion opens the result bubble for **Edit** or **Copy**. Successful Copy closes the bubble; copying from **Edit result** also closes that editor. Original transcripts and final prose remain in History. **Record to preview** and Demo retain their preview. Disable the setting to restore results after every operation. Selection editing starts with a preview; **Replace** rechecks the original target and selection before writing.
+
+**Settings → Appearance** configures the display, eight anchors, edge spacing, capsule width/height, result width, and optional mouse following with pointer spacing. Following uses the pointer’s display, flips sides at screen edges and pauses on hover so buttons stay clickable. Fixed bottom placement remains the default. Entry and exit offer **Pop / Slide / Fade / None**; state transitions and voice-bar motion can be disabled separately, with a 120–500 ms duration. **Preview animation** plays synthetic recording, processing and result states using unsaved choices, without microphone capture or service requests. Save to apply. Legacy narrow sizes move to the new default; other valid appearance preferences remain.
+
+The capsule combines actual workflow milestones with smooth estimated progress while processing. Percentages are estimates, not server-reported model progress; only validated completion reaches 100%. Task-specific stage hints describe the waiting interface and do not add model requests. See [estimated progress](docs/ESTIMATED_PROGRESS.md). Results that require review or manual copying expand over 240 ms. Clear, confirmed delivery closes quietly. Starting another recording or cancelling invalidates older animation and insertion callbacks.
+
+Wording review metadata arrives in the same refinement or translation request, without an additional model call or changing the selected model. It reports unresolved wording, references or correction scope, rather than a calibrated speech-accuracy percentage. Missing or invalid assessment metadata preserves the prose for review. Supported native Windows text fields receive direct insertion without changing the clipboard; other verifiable fields use the existing paste transaction. Unverifiable inputs fall back to manual Copy without automatically overwriting the clipboard.
 
 Speech or refinement failures stay in a compact error bubble. Recovered original text is available for manual **Copy** or **Review**; errors never automatically copy or paste partial text. If no transcript was captured, only the diagnostic and **Dismiss** are shown. An already open selection editor retains its error in place.
 
@@ -254,7 +260,7 @@ uv run murmur --offline-engine qwen_asr --offline-acceleration gpu --transcribe-
 | Storage and insights | [`storage.py`](murmur/storage.py), [`insights.py`](murmur/insights.py) |
 | Windows integration | [`hotkeys.py`](murmur/hotkeys.py), [`windows.py`](murmur/windows.py), [`clipboard.py`](murmur/clipboard.py) |
 
-The current **0.4.5 Beta** adds bounded participant/state fidelity checks for explicit first-person uncertainty, confirmation and decision statements, improves compact-8 examples, and gives service controls module-specific accessible names. The recorded frozen regression passed **1849 tests**; six public local 4B samples received five complete and one partial quality assessments. Preference statements such as “I hope” remain outside the narrow participant guard. See [0.4.5 changes and limits](docs/RELEASE_0.4.5.md).
+The earlier **0.4.5 Beta** added bounded participant/state fidelity checks for explicit first-person uncertainty, confirmation and decision statements, improves compact-8 examples, and gives service controls module-specific accessible names. The recorded frozen regression passed **1849 tests**; six public local 4B samples received five complete and one partial quality assessments. Preference statements such as “I hope” remain outside the narrow participant guard. See [0.4.5 changes and limits](docs/RELEASE_0.4.5.md).
 
 The earlier **0.4.4 local Beta** added narrow protected term/time spans, shared dictation/refinement recovery, bounded writing examples, and safeguards for observed causal and completed-action drift. Services now shows a new check ahead of older download status. Actual local 4B drafts, failures, final recorded-response replay and source checks are separated in [0.4.4 validation](docs/RELEASE_0.4.4.md); [TypeFree analysis](docs/TYPEFREE_ANALYSIS.md) maps the original audio, provider and prompt work. The earlier controlled SenseVoice audio check remains historical. Cloud audio, native hotkeys/insertion and real microphone/noise quality still need field testing.
 
@@ -284,4 +290,4 @@ Thanks to CapsWriter-Offline for architectural inspiration, and to the SenseVoic
 
 [v0.4.4 local Beta changes](docs/RELEASE_0.4.4.md).
 
-Current local Beta: [0.4.5 changes and validation](docs/RELEASE_0.4.5.md).
+Current Beta: [0.4.6 changes and validation](docs/RELEASE_0.4.6.md).

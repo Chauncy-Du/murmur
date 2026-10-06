@@ -8,6 +8,19 @@ from .ui import AdvancedSection, CompactComboBox, button, label, line_icon
 from .service_settings import ServiceSettings, ServiceStatusLabel, AUTO_POLICY_DESCRIPTION, AUTO_POLICY_HELP
 
 
+def preview_bubble(window):
+    if getattr(window,'_session_phase','idle')!='idle':return
+    from .appearance_preview import AppearancePreview
+    previous=getattr(window,'_appearance_preview',None)
+    if previous:previous.replace()
+    cfg=dict(window.store.config)
+    for key,widget in window.fields.items():
+        if not key.startswith('bubble_'):continue
+        cfg[key]=(widget.isChecked() if isinstance(widget,QCheckBox) else widget.currentData()
+                  if hasattr(widget,'currentData') else widget.value())
+    window._appearance_preview=AppearancePreview(window,cfg)
+
+
 class SettingsRows(QVBoxLayout):
     """Form-compatible rows with descriptions and responsive trailing controls.
 
@@ -216,6 +229,7 @@ def build_settings(window):
     _, f = group('General', 'Dictation', 'mic')
     field(f, 'demo', 'Demo mode', 'bool', description='Try a sample without recording or API requests.')
     field(f, 'polish', 'Refine dictated text', 'bool', description='Turn speech into clear writing in the original language.')
+    field(f, 'smart_delivery', 'Show results only when needed', 'bool', description='Insert clear dictation and translations quietly. Review uncertain wording or copy when insertion cannot be confirmed.')
     devices = [('System default', '')]
     try:
         import sounddevice as sd
@@ -339,7 +353,7 @@ def build_settings(window):
     f.addRow('Source', window.llm_source)
     window.llm_source.currentIndexChanged.connect(window.change_llm_source)
     window.llm_preset = CompactComboBox()
-    for title, value in [('Custom', 'custom'), ('Local · Auto', 'local_auto'), ('DeepSeek · Flash', 'deepseek'), ('Ollama · Auto', 'auto'), ('Ollama · Qwen3.5 2B', '2b'), ('Ollama · Qwen3.5 4B', '4b'), ('Ollama · Qwen3.5 9B', '9b')]:
+    for title, value in [('Custom', 'custom'), ('ProjectHub · Private API', 'projecthub'), ('Local · Auto', 'local_auto'), ('DeepSeek · Flash', 'deepseek'), ('Ollama · Auto', 'auto'), ('Ollama · Qwen3.5 2B', '2b'), ('Ollama · Qwen3.5 4B', '4b'), ('Ollama · Qwen3.5 9B', '9b')]:
         window.llm_preset.addItem(title, value)
     window.llm_preset.setToolTip('Fill provider, endpoint and model. Save changes to apply.')
     window.llm_preset.currentIndexChanged.connect(window.apply_llm_preset)
@@ -351,7 +365,8 @@ def build_settings(window):
     selection = field(f, 'ollama_auto', 'Model selection', 'choice', [('Auto · prefer 4–8B', True), ('Specify model', False)], AUTO_POLICY_DESCRIPTION)
     selection.setToolTip(AUTO_POLICY_HELP)
     selection.currentIndexChanged.connect(window.update_llm_selection)
-    field(f, 'llm_model', 'Text LLM', description='Model name; 4B means about 4 billion parameters.')
+    picker=field(f, 'llm_model', 'Text LLM', 'model', description='Enter an API key, refresh, then choose a model.')
+    picker.refreshRequested.connect(lambda:window.request_model_refresh('llm'))
     window.llm_key = password(f, 'API key', 'Stored in Windows credentials.', 'Text processing API key')
     window.llm_hint = note('')
     f.addRow(window.llm_hint)
@@ -373,12 +388,14 @@ def build_settings(window):
     window.llm_advanced.form.addRow(note('Optional USD per 1M tokens · blank = provider rate when known'))
     window.ask_service_section, f = group('Services', 'Ask Anything', 'mic', window.services_detail_layouts['ask'])
     field(f, 'ask_llm_url', 'API base URL', description='Independent external service for voice editing, questions and drafts.')
-    field(f, 'ask_llm_model', 'Model', description='Use a model that supports JSON output.')
+    picker=field(f, 'ask_llm_model', 'Model', 'model', description='Refresh to choose a model that follows the requested JSON format.')
+    picker.refreshRequested.connect(lambda:window.request_model_refresh('ask'))
     window.ask_llm_key = password(f, 'API key', 'A separate key stored in Windows credentials.', 'Ask Anything API key')
     window.ask_llm_hint = note('')
     f.addRow(window.ask_llm_hint)
     f.addRow(note('Your spoken request and selected text are sent to this service. Answers appear in a card; edits and drafts write to a confirmed target.'))
     window.add_service_test_row(f, 'ask')
+    f.addRow(note('ProjectHub: enter your key, click Refresh models, choose a model, then save. Refresh and Test only query availability. Queued tasks may take several minutes.'))
     window.remove_ask_key_button = button('Remove Ask key', window.clear_ask_key)
     f.addRow('Saved Ask key', window.remove_ask_key_button)
     window.remove_keys_button = button('Remove saved keys', window.clear_keys)
@@ -396,18 +413,47 @@ def build_settings(window):
     window.key_status = note('')
     f.addRow(window.key_status)
 
-    _, f = group('Appearance', 'Floating capsule', 'waveform')
-    field(f, 'bubble_position', 'Position', 'choice', [('Bottom', 'bottom'), ('Top', 'top')], 'Where the recording capsule appears.')
-    field(f, 'bubble_screen', 'Display', 'choice', [(f'{i + 1} · {s.name()}', i) for i, s in enumerate(QApplication.screens())])
-    field(f, 'bubble_offset', 'Edge offset', 'int', description='Distance from the screen edge, in pixels.')
-    width = field(f, 'bubble_width', 'Width', 'int', description='Capsule width, in pixels.')
-    width.setRange(156, 180)
+    _, f = group('Appearance', 'Floating bubble', 'waveform')
+    window.bubble_preview_button=button('Preview animation',lambda:preview_bubble(window))
+    window.bubble_preview_button.setIcon(line_icon('play',16))
+    f.addRow(window.bubble_preview_button)
+    field(f, 'bubble_position', 'Position', 'choice', [('Bottom center','bottom'),('Top center','top'),('Left center','left'),('Right center','right'),('Top left','top-left'),('Top right','top-right'),('Bottom left','bottom-left'),('Bottom right','bottom-right')], 'Anchor on the selected display.')
+    field(f, 'bubble_screen', 'Display', 'choice', [(f'{i + 1} · {s.name()}', i) for i, s in enumerate(QApplication.screens())], 'Follow mouse uses the pointer’s current display.')
+    edge=field(f, 'bubble_offset', 'Edge spacing · px', 'int', description='Distance from the available screen edge.')
+    edge.setRange(0,3650)
+    follow=field(f,'bubble_follow_mouse','Follow mouse','bool',description='Stay beside the pointer. Pause while hovering to click buttons.')
+    gap=field(f,'bubble_cursor_offset','Pointer spacing · px','int',description='Used when following the mouse, on its current display.')
+    gap.setRange(12,160)
+    def follow_changed(checked):
+        for key in ('bubble_position','bubble_screen','bubble_offset'):window.fields[key].setEnabled(not checked)
+        gap.setEnabled(checked)
+    follow.toggled.connect(follow_changed);follow_changed(follow.isChecked())
+    _, f = group('Appearance', 'Size')
+    width = field(f, 'bubble_width', 'Capsule width · px', 'int')
+    width.setRange(200,360)
+    height=field(f,'bubble_height','Capsule height · px','int');height.setRange(40,64)
+    result=field(f,'bubble_result_width','Result width · px','int');result.setRange(320,640)
+    _, f = group('Appearance', 'Motion')
+    styles=[('Pop','pop'),('Slide','slide'),('Fade','fade'),('None','none')]
+    field(f,'bubble_enter_motion','Appear','choice',styles,'How the bubble enters the screen.')
+    field(f,'bubble_exit_motion','Disappear','choice',styles,'How it closes after completion, Copy or Dismiss.')
+    field(f,'bubble_state_motion','Animate state changes','bool',description='Blend recording, processing and result states.')
+    field(f,'bubble_wave_motion','Animate voice indicator','bool',description='Show live microphone levels. Off keeps a static microphone indicator.')
+    field(f,'bubble_wave_style','Voice indicator style','choice',
+          [('Scrolling bars · Classic','bars'),('Soft ribbon','centered'),('Neon matrix','dots'),('Smooth line','line'),('Recording timeline','timeline')],
+          'Preview each style below. Height, stroke width and grid spacing stay fixed as the bubble grows.')
+    speed=field(f,'bubble_motion_duration','Motion duration · ms','int',description='Shorter is faster. Preview uses current unsaved choices.')
+    speed.setRange(120,500)
     _, f = group('Appearance', 'Local data', 'history')
-    field(f, 'retention', 'Keep history', 'int', description='Days to retain records. Set 0 to keep forever.')
+    retention=field(f, 'retention', 'Keep history', 'int', description='Days to retain records. Set 0 to keep forever.')
+    retention.setRange(0,3650)
     field(f, 'save_audio', 'Save recordings', 'bool', description='Keep audio locally alongside your history.')
     data_note = note('Data stays on this device.')
     data_note.setToolTip(str(window.store.root))
     f.addRow(data_note)
+    from .storage_usage import LocalStorageUsage
+    window.local_storage_usage=LocalStorageUsage(window.store.root)
+    f.addRow(window.local_storage_usage)
 
     _, f = group('Writing', 'Writing preferences', 'edit')
     field(f, 'style', 'Writing style', description='Tone for clear writing in the original language.')
@@ -442,6 +488,12 @@ def build_settings(window):
     window.update_offline_readiness()
     window.update_shortcut_hint()
     window.wire_service_test_changes()
+    for kind,prefix,key_field in [('llm','llm',window.llm_key),('ask','ask_llm',window.ask_llm_key)]:
+        picker=window.fields[prefix+'_model']
+        picker.modelsChanged.connect(window.update_services_overview)
+        window.fields[prefix+'_url'].textChanged.connect(picker.clearModels)
+        key_field.textChanged.connect(picker.clearModels)
+        key_field.editingFinished.connect(lambda service=kind:window.refresh_models_after_key(service))
     for key in ('llm_url', 'llm_model'):
         window.fields[key].textChanged.connect(window.update_llm_profile)
     window.fields['llm_url'].textChanged.connect(window.update_llm_selection)

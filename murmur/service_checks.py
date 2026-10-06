@@ -234,7 +234,47 @@ def _checked_model_metadata(model, response, automatic):
     return result
 
 
+def _model_catalog(cfg, secrets, cancel, kind):
+    """GET-only discovery with draft keys; no model selection is required."""
+    from . import projecthub
+    if kind=='ask':
+        try:cfg=ask_config(dict(cfg,ask_llm_model=cfg.get('ask_llm_model') or 'discovery'))
+        except RuntimeError as exc:raise _CheckError('Invalid Ask Anything configuration',str(exc)) from None
+    base=_endpoint(str(cfg.get('llm_url','')).strip(),('http','https'))
+    ollama=bool(cfg.get('ollama'))
+    if ollama and not base.endswith('/v1'):base+='/v1'
+    key=_secret('ask_llm',secrets) if kind=='ask' else 'local' if is_local_endpoint(base) else 'ollama' if ollama else _secret('llm',secrets)
+    if not key:raise _CheckError('API key missing','Enter your API key, then refresh models. A saved key is used when the field is blank.')
+    _cancelled(cancel)
+    with httpx.Client(timeout=httpx.Timeout(20,connect=5),follow_redirects=False) as client:
+        if projecthub.is_projecthub(base):
+            try:entries,_=projecthub.discover(client,base,key,cancel)
+            except RuntimeError as exc:raise _CheckError('Model discovery failed',str(exc)) from None
+        else:
+            response=client.get(base+'/models',headers={'Authorization':'Bearer '+key})
+            if response.status_code>=400:
+                raise _CheckError('Model discovery failed',f'HTTP {response.status_code}. Check the API key, endpoint and model-list permission.')
+            try:entries=response.json()['data']
+            except (ValueError,KeyError,TypeError):
+                raise _CheckError('Invalid model list','The service did not return a valid models catalog.') from None
+    _cancelled(cancel)
+    if not isinstance(entries,list):raise _CheckError('Invalid model list','The service did not return a valid models catalog.')
+    models=[];seen=set()
+    for entry in entries[:1000]:
+        if not isinstance(entry,dict) or entry.get('available') is False:continue
+        identity=entry.get('id')
+        if not isinstance(identity,str) or not identity.strip() or len(identity)>300 or identity in seen:continue
+        name=entry.get('name')
+        name=name if isinstance(name,str) and name.strip() else identity
+        models.append({'id':identity,'name':name[:300]});seen.add(identity)
+    if not models:raise _CheckError('No available text models','The service returned no available text models for this key. Check model permissions and gateway readiness.')
+    model=cfg.get('llm_model','')
+    return ('Models refreshed',f'{len(models)} available models. Choose one in the model menu, then save. No generation was submitted.',
+            None,{'model':model,'model_selection':'explicit','models':models,'available_models':[item['id'] for item in models]})
+
+
 def _llm(cfg, secrets, cancel, usage_sink=None, kind='llm'):
+    if cfg.get('_model_discovery'):return _model_catalog(cfg,secrets,cancel,kind)
     if kind=='ask':
         try:cfg=ask_config(cfg)
         except RuntimeError as exc:raise _CheckError('Invalid Ask Anything configuration',str(exc)) from None
@@ -245,6 +285,18 @@ def _llm(cfg, secrets, cancel, usage_sink=None, kind='llm'):
     if not model and not auto_enabled(cfg):raise _CheckError('Model missing', 'Enter an LLM model name before testing.')
     key = _secret('ask_llm', secrets) if kind=='ask' else 'local' if is_local_endpoint(base) else 'ollama' if ollama else _secret('llm', secrets)
     if not key:raise _CheckError('API key missing', 'Enter an Ask Anything API key before testing.' if kind=='ask' else 'Enter an LLM API key before testing.')
+    from . import projecthub
+    if projecthub.is_projecthub(base):
+        with httpx.Client(timeout=httpx.Timeout(30,connect=5),follow_redirects=False) as client:
+            entries, capabilities=projecthub.discover(client,base,key,cancel)
+        ids=[entry['id'] for entry in entries]
+        if model not in ids:
+            raise _CheckError('Model unavailable', 'Available ProjectHub text model IDs: '+', '.join(ids))
+        return ('Connected · models discovered',
+                'ProjectHub authentication and discovery succeeded. Available text model IDs: '+', '.join(ids)+
+                '. No generation was submitted. Try Polish or Ask to verify model output; tasks may take several minutes.',
+                None, {'model':model,'model_selection':'explicit','available_models':ids,
+                       'models':[{'id':entry['id'],'name':entry['name'] if isinstance(entry.get('name'),str) and entry['name'] else entry['id']} for entry in entries]})
     request = {'model':model, 'messages':[{'role':'user', 'content':'Reply with only OK.'}],
                'temperature':0, 'max_tokens':8}
     if kind=='ask':

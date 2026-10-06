@@ -38,13 +38,15 @@ def test_categories_and_field_snapshot_are_complete(window):
     assert tabs.tabBar().isHidden()
     assert [tabs.tabText(i) for i in range(5)] == ['General', 'Services', 'Shortcuts', 'Appearance', 'Writing']
     expected = {
-        'demo', 'polish', 'microphone', 'language', 'startup', 'asr_backend',
+        'demo', 'polish', 'smart_delivery', 'microphone', 'language', 'startup', 'asr_backend',
         'asr_model', 'asr_url', 'vocabulary_id', 'offline_engine', 'offline_model_dir',
         'offline_language', 'offline_threads', 'ali_nls_url', 'ollama',
         'ollama_auto', 'llm_model', 'llm_url', 'llm_input_price_per_million',
         'llm_output_price_per_million', 'llm_cache_price_per_million', 'trigger',
         'dictation_key', 'translation_key', 'selection_key', 'bubble_position',
         'bubble_screen', 'bubble_offset', 'bubble_width', 'retention',
+        'bubble_height','bubble_result_width','bubble_follow_mouse','bubble_cursor_offset',
+        'bubble_enter_motion','bubble_exit_motion','bubble_state_motion','bubble_wave_motion','bubble_wave_style','bubble_motion_duration',
         'save_audio', 'style', 'rules', 'ask_key', 'ask_llm_url', 'ask_llm_model', 'offline_acceleration',
         'asr_http_url','asr_http_model','asr_http_language','asr_http_timeout',
         'audio_quality_enabled','audio_noise_gate','audio_lead_padding_ms','audio_tail_padding_ms',
@@ -55,7 +57,7 @@ def test_categories_and_field_snapshot_are_complete(window):
     assert set(values['prompts']) == set(window.store.config['prompts'])
     assert secrets == {'asr': '', 'llm': '', 'ali_appkey': '', 'ali_token': '', 'ask_llm': '',
                        'asr_openai_key':'','asr_groq_key':'','asr_http_key':''}
-    assert window.fields['bubble_width'].value() == 168
+    assert window.fields['bubble_width'].value() == 224
     assert window.main_sidebar.isHidden()
 
 
@@ -152,10 +154,10 @@ def test_switch_center_and_keyboard_keep_boolean_save_values(window):
     assert switch.isChecked() is before
     window.settings_tabs.setCurrentIndex(3)
     width = window.fields['bubble_width']
-    width.setValue(168)
+    width.setValue(224)
     QTest.keyClick(width, Qt.Key_Up)
     values, _ = window._settings_snapshot()
-    assert values['bubble_width'] == 169
+    assert values['bubble_width'] == 225
 
 
 def test_advanced_settings_do_not_create_horizontal_scroll(window):

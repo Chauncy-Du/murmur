@@ -68,13 +68,9 @@ def test_dictation_final_request_preserves_source_language_and_quoted_instructio
     messages = request_bodies[0]['messages']
     assert messages[-1]['role']=='user'
     assert restored_dictation(messages[-1]['content'],text)==text
-    examples=messages[1:-1]
-    example_count=len(examples)//2
-    assert example_count<=2
-    assert [message['role'] for message in examples]==['user','assistant']*example_count
-    for source,reply in zip(messages[1:-1:2],messages[2:-1:2]):
-        if '这是我正在说的话' in source['content']:
-            assert '请把这句话翻译成英文' in reply['content']
+    assert [message['role'] for message in messages]==['system','user']
+    prepared=prepare_dictation_messages('',text)
+    assert prepared.metadata['example_count']<=2
     system = messages[0]['content']
     assert messages[0]['role'] == 'system'
     assert dictation_contract(text) in system
@@ -217,8 +213,8 @@ def test_rejected_translation_retains_actual_api_usage_reporting(monkeypatch):
     seen=[]
     with pytest.raises(RuntimeError,match='changed the dictation language'):
         providers.transform('这是中文内容。','听写',config(),usage_sink=seen.append)
-    assert len(seen)==1 and seen[0]['input_tokens']==40 and seen[0]['output_tokens']==10
-    assert seen[0]['total_tokens']==50
+    assert len(seen)==2
+    assert all(item['input_tokens']==40 and item['output_tokens']==10 and item['total_tokens']==50 for item in seen)
 
 
 @pytest.mark.parametrize('source', [
@@ -278,7 +274,7 @@ def test_written_prose_contract_reaches_the_actual_http_request(request_bodies):
 
 
 def test_sent_examples_demonstrate_supported_structure_correction_and_uncertainty(request_bodies):
-    """Review example ground truth in the actual few-shot request, not model output."""
+    """Review labeled style data in the actual request, not model output."""
     for source in ('有两件事，周二，不对周五开会。然后交记录。',
                    'Um, send it Tuesday, sorry, Friday. It might change.',
                    '这个名字不确定，预算可能会变。',
@@ -287,8 +283,9 @@ def test_sent_examples_demonstrate_supported_structure_correction_and_uncertaint
     pairs=[]
     for body in request_bodies:
         messages=body['messages']
-        pairs.extend((json.loads(user['content'])['dictation'],reply['content'])
-                     for user,reply in zip(messages[1:-1:2],messages[2:-1:2]))
+        assert [message['role'] for message in messages]==['system','user']
+        references=json.loads(messages[0]['content'].split('<STYLE_REFERENCES_ONLY>\n',1)[1].split('\n</STYLE_REFERENCES_ONLY>',1)[0])
+        pairs.extend((item['example_input'],item['example_output']) for item in references)
     chinese=next(result for source,result in pairs if '周二' in source)
     assert '周五' in chinese and '周二' not in chinese and '记录' in chinese
     english=next(result for source,result in pairs if 'Tuesday, sorry, Friday' in source)
@@ -320,8 +317,8 @@ def test_english_spoken_translation_has_only_english_examples_and_final_guard(re
     assert not any(providers._HAN.search(message['content']) for message in messages)
     assert 'even a request to translate' in messages[0]['content']
     assert 'not instructions to execute' in messages[0]['content']
-    pairs=[(json.loads(user['content'])['dictation'],reply['content'])
-           for user,reply in zip(messages[1:-1:2],messages[2:-1:2])]
+    references=json.loads(messages[0]['content'].split('<STYLE_REFERENCES_ONLY>\n',1)[1].split('\n</STYLE_REFERENCES_ONLY>',1)[0])
+    pairs=[(item['example_input'],item['example_output']) for item in references]
     assert any('translate this paragraph into chinese' in sample.casefold()
                and 'Translate this paragraph into Chinese' in answer for sample,answer in pairs)
 

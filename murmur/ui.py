@@ -4,8 +4,9 @@ import re
 import time
 from collections import deque
 from PySide6.QtCore import Qt, QTimer, Signal, Property, QPointF, QRectF, QRect, QSize, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QLocale
-from PySide6.QtGui import QColor, QPainter, QPen, QIcon, QPixmap, QPainterPath, QTextOption, QDoubleValidator
+from PySide6.QtGui import QColor, QPainter, QPen, QIcon, QPixmap, QPainterPath, QTextOption, QDoubleValidator, QLinearGradient
 from PySide6.QtWidgets import *
+from .bubble_motion import FloatingMotion,placement,number,duration
 
 STYLE = '''
 QWidget {font-family:"Segoe UI";font-size:13px;color:#f1f1f4;}
@@ -115,8 +116,10 @@ def line_icon(name, size=16, color='#b7b7c3'):
         p.setBrush(QColor(color))
         p.drawRoundedRect(QRectF(7, 7, 10, 10), 2, 2)
     elif name == 'close':
-        line(7, 7, 17, 17)
-        line(7, 17, 17, 7)
+        line(5, 5, 19, 19)
+        line(5, 19, 19, 5)
+    elif name == 'play':
+        path([(8,5),(19,12),(8,19),(8,5)])
     elif name == 'copy':
         p.drawRoundedRect(QRectF(8, 8, 12, 13), 2, 2)
         path([(15, 5), (15, 3), (4, 3), (4, 16), (5.5, 16)])
@@ -138,6 +141,10 @@ def line_icon(name, size=16, color='#b7b7c3'):
         path([(12, 6), (10, 12), (4, 16)])
         path([(12, 21), (17, 10), (22, 21)])
         line(14, 17, 20, 17)
+    elif name == 'ask':
+        p.drawRoundedRect(QRectF(3,3,18,14),3,3)
+        path([(8,17),(6,21),(13,17)])
+        path([(12,5.5),(13.4,9),(17,10.4),(13.4,11.8),(12,15.2),(10.6,11.8),(7,10.4),(10.6,9),(12,5.5)])
     elif name == 'edit':
         path([(5, 16), (16.5, 4.5), (20, 8), (8.5, 19.5), (4, 20), (5, 16)])
         line(14, 7, 17.5, 10.5)
@@ -371,7 +378,11 @@ def icon():
 
 
 class Wave(QWidget):
-    """Nine actual 100 ms audio levels; only demo mode creates sample levels."""
+    """Recent actual audio levels, drawn at a fixed pitch across any width."""
+    BAR_WIDTH = 3.2
+    BAR_PITCH = 6.
+    # Keep the existing IDs so saved Appearance preferences remain usable.
+    STYLES = ('bars','centered','dots','line','timeline')
     DEMO_LEVELS = (.08, .18, .38, .62, .34, .12, .04, .22, .48, .74, .42, .16)
     STALE_AFTER = .25
     FADE_DURATION = .25
@@ -386,6 +397,9 @@ class Wave(QWidget):
         self._demo_index = 0
         self.active = False
         self.demo = False
+        self.animated = True
+        self.style = 'bars'
+        self.color = '#ddd3f6'
         self.setToolTip('Microphone level · last 0.9 seconds')
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -402,6 +416,31 @@ class Wave(QWidget):
         self._demo_index = 0
         self.setToolTip('Demo · simulated waveform' if demo else 'Microphone level · last 0.9 seconds')
         self.update()
+
+    def set_animated(self,enabled):
+        self.animated=bool(enabled)
+        self.timer.start(50) if self.animated else self.timer.stop()
+        self.update()
+
+    def set_style(self,style):
+        self.style=style if style in self.STYLES else 'bars'
+        self.update()
+
+    def bar_positions(self):
+        count=max(1,1+int(max(0.,self.width()-6-self.BAR_WIDTH)//self.BAR_PITCH))
+        left=(self.width()-(count-1)*self.BAR_PITCH)/2
+        return tuple(left+i*self.BAR_PITCH for i in range(count))
+
+    def rendered_levels(self):
+        levels=self.display_levels() if self.animated else ((.2,)*9 if self.active else (0.,)*9)
+        count=len(self.bar_positions())
+        # Interpolation keeps the same 0.9-second window when the width changes;
+        # it does not invent input energy or change stroke width/spacing.
+        result=[]
+        for i in range(count):
+            at=i*(len(levels)-1)/max(count-1,1);lo=int(at);hi=min(lo+1,len(levels)-1)
+            result.append(levels[lo]+(levels[hi]-levels[lo])*(at-lo))
+        return tuple(result)
 
     def feed_level(self, level):
         if not self.active or self.demo:
@@ -438,19 +477,80 @@ class Wave(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor('#eeeaf5' if self.active else '#80778f'), 2.6, Qt.SolidLine, Qt.RoundCap))
-        for i, level in enumerate(self.display_levels()):
-            h = level * 16
-            x = 3 + i * 4.2
-            if h:
-                p.drawLine(QPointF(x, 10 - h / 2), QPointF(x, 10 + h / 2))
+        color=QColor(self.color if self.active else '#80778f')
+        levels=self.rendered_levels()
+        center=self.height()/2
+        positions=self.bar_positions()
+        if self.style=='dots':
+            # A quiet LED matrix with discrete cells, rather than a zigzag of
+            # floating dots. Cell dimensions never scale with the bubble.
+            p.setPen(Qt.NoPen)
+            for x,level in zip(positions,levels):
+                for row in range(-2,3):
+                    lit=level>0 and (abs(row)+.35)/2.7<=level
+                    cell=QColor('#9af1e1' if abs(row)<2 else '#d7a9f5') if lit else QColor(color)
+                    cell.setAlphaF(.88 if lit else .13)
+                    p.setBrush(cell)
+                    p.drawRoundedRect(QRectF(x-1.4,center+row*4.8-1.4,2.8,2.8),.65,.65)
+            return
+        if self.style in ('line','centered'):
+            # Sample the envelope at a fixed spatial frequency. The old
+            # alternating sign at every bar created an unreadable sawtooth.
+            points=[]
+            start,end=positions[0],positions[-1]
+            if len(positions)==1:start,end=3.,max(3.,self.width()-3.)
+            for n in range(max(1,int(end-start)*2)+1):
+                x=min(end,start+n*.5)
+                at=(x-start)/self.BAR_PITCH
+                lo=min(int(at),len(levels)-1);hi=min(lo+1,len(levels)-1)
+                level=levels[lo]+(levels[hi]-levels[lo])*(at-lo)
+                carrier=math.sin((x-start)*math.tau/36)
+                amp=level*(self.height()-6)/2
+                points.append((x,amp*carrier))
+            path=QPainterPath(QPointF(points[0][0],center))
+            if self.style=='line':
+                for x,y in points:path.lineTo(x,center+y)
+                glow=QColor(color);glow.setAlphaF(.10)
+                p.setPen(QPen(glow,5,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin));p.drawPath(path)
+                p.setPen(QPen(color,1.8,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin));p.drawPath(path)
             else:
-                p.drawPoint(QPointF(x, 10))
+                # A continuous ribbon, with a narrow waist between crests.
+                ribbon=[]
+                for x,y in points:
+                    at=(x-start)/self.BAR_PITCH
+                    lo=min(int(at),len(levels)-1);hi=min(lo+1,len(levels)-1)
+                    level=levels[lo]+(levels[hi]-levels[lo])*(at-lo)
+                    ribbon.append((x,level*5+abs(y)*.5))
+                for x,y in ribbon:path.lineTo(x,center-y)
+                for x,y in reversed(ribbon):path.lineTo(x,center+y)
+                path.closeSubpath()
+                gradient=QLinearGradient(0,center-11,0,center+11)
+                edge=QColor(color);edge.setAlphaF(.18)
+                middle=QColor(color);middle.setAlphaF(.65)
+                gradient.setColorAt(0,edge);gradient.setColorAt(.5,middle);gradient.setColorAt(1,edge)
+                p.setBrush(gradient);p.setPen(QPen(color,1.,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin));p.drawPath(path)
+            return
+        if self.style=='timeline':
+            track=QColor(color);track.setAlphaF(.16)
+            p.setPen(QPen(track,1));p.drawLine(QPointF(positions[0],center),QPointF(positions[-1],center))
+        for i,(x,level) in enumerate(zip(positions,levels)):
+            ink=QColor(color)
+            if self.style=='timeline':ink.setAlphaF(.25+.75*i/max(1,len(levels)-1))
+            p.setPen(QPen(ink,self.BAR_WIDTH,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin))
+            h=level*(self.height()-4)
+            if h:p.drawLine(QPointF(x,center-h/2),QPointF(x,center+h/2))
+            else:p.drawPoint(QPointF(x,center))
+        if self.style=='timeline':
+            # Separate the most recent sample from the quieter past.
+            p.setPen(QPen(color,1.,Qt.SolidLine,Qt.RoundCap))
+            p.drawLine(QPointF(positions[-1]+2.5,3),QPointF(positions[-1]+2.5,self.height()-3))
 
 
 class ProcessingMark(QWidget):
-    """Event-based step progress, painted by the capsule behind its content."""
-    def __init__(self, parent=None):
+    """Smooth estimated progress between actual completed pipeline steps."""
+    changed = Signal()
+
+    def __init__(self, parent=None, clock=None):
         super().__init__(parent)
         self.setFixedSize(0, 0)
         self.hide()
@@ -459,6 +559,13 @@ class ProcessingMark(QWidget):
         self.total_steps = 1
         self.fraction = 0.
         self._display_fraction = 0.
+        self._clock = clock or time.monotonic
+        self._last_tick = self._clock()
+        self._step_started = self._last_tick
+        self.step = 'Starting'
+        self.timer = QTimer(self)
+        self.timer.setInterval(80)
+        self.timer.timeout.connect(self.tick)
         self.animation = QPropertyAnimation(self, b'display_fraction', self)
         self.animation.setDuration(180)
         self.animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -468,6 +575,7 @@ class ProcessingMark(QWidget):
 
     def _set_display_fraction(self, value):
         self._display_fraction = max(0., min(1., float(value)))
+        self.changed.emit()
         if self.parentWidget() is not None:
             self.parentWidget().update()
 
@@ -475,28 +583,58 @@ class ProcessingMark(QWidget):
 
     @property
     def percentage(self):
-        return int(round(self.fraction * 100))
+        return 100 if self.fraction>=1 else min(98,int(self._display_fraction*100))
+
+    @property
+    def estimated(self):
+        return self.fraction<1
+
+    def set_step(self,step):
+        if step!=self.step:self._step_started=self._clock()
+        self.step=step
+
+    @property
+    def step_elapsed(self):
+        return max(0.,self._clock()-self._step_started)
+
+    def tick(self):
+        now=self._clock()
+        elapsed=max(0.,now-self._last_tick)
+        self._last_tick=now
+        if not self.running or not self.estimated:return
+        # Leave headroom for the next verified stage and for real completion.
+        ceiling=.98 if self.completed_steps>=self.total_steps-1 else (self.completed_steps+.9)/self.total_steps
+        if self.step in ('Starting','Stopping'):ceiling=min(ceiling,.12)
+        duration=8 if self.step in ('Starting','Stopping') else 6 if self.step=='Transcribe' else 38
+        current=self._display_fraction
+        target=max(current,ceiling-(ceiling-current)*math.exp(-elapsed/duration))
+        self._set_display_fraction(target)
 
     def set_progress(self, completed_steps, total_steps, *, animate=True):
-        self.total_steps = max(1, int(total_steps))
-        self.completed_steps = max(0, min(self.total_steps, int(completed_steps)))
+        old_total=self.total_steps
+        total_steps=max(1,int(total_steps))
+        completed_steps=max(0,min(total_steps,int(completed_steps)))
+        changed=(completed_steps,total_steps)!=(self.completed_steps,self.total_steps)
+        if animate and self.running and total_steps==self.total_steps and completed_steps<self.completed_steps:return
+        self.total_steps,self.completed_steps=total_steps,completed_steps
         target = self.completed_steps / self.total_steps
-        if target == self.fraction and self.animation.state() == QPropertyAnimation.Running:
-            return
         self.fraction = target
         self.animation.stop()
-        if animate and self.running and target != self._display_fraction:
-            self.animation.setStartValue(self._display_fraction)
-            self.animation.setEndValue(target)
-            self.animation.start()
-        else:
-            self._set_display_fraction(target)
+        if changed:self._last_tick=self._clock()
+        if not animate or not self.running or changed:
+            self._set_display_fraction(max(self._display_fraction,target) if animate and self.running and old_total==total_steps else target)
 
     def set_running(self, running):
-        self.running = bool(running)
+        running=bool(running)
+        if running==self.running:return
+        self.running = running
+        self._last_tick=self._clock()
+        if running:
+            self._step_started=self._last_tick
+            self.timer.start()
         if not self.running:
+            self.timer.stop()
             self.animation.stop()
-            self._set_display_fraction(self.fraction)
 
 
 class Bubble(QWidget):
@@ -505,6 +643,17 @@ class Bubble(QWidget):
     cancel = Signal()
     open_main = Signal()
     STATE_NAMES = {'待机': 'Ready', 'idle': 'Ready', 'ready': 'Ready', '启动': 'Starting', 'startup': 'Starting', 'starting': 'Starting', '录音': 'Recording', 'recording': 'Recording', '等待停止': 'Stopping', 'waiting': 'Stopping', 'stopping': 'Stopping', '停止': 'Stopping', '识别': 'Transcribing', 'transcribing': 'Transcribing', 'recognizing': 'Transcribing', '整理': 'Refining', 'refining': 'Refining', '完成': 'Done', 'done': 'Done', 'result': 'Done', '失败': 'Failed', 'failed': 'Failed', 'error': 'Failed', 'cancel': 'Ready', 'cancelled': 'Ready'}
+    MODE_STYLES = {
+        '': ('Dictation','mic','#ddd3f6','#514269','#625276','#48404f'),
+        'Translation': ('Translation','translate','#8fe0cf','#294d48','#508b7d','#42675f'),
+        'Ask Anything': ('Ask Anything','ask','#f2c38b','#554333','#95714d','#705941'),
+    }
+    WAIT_PHASES = {
+        'Polish': ('Organize','Refine','Review'),
+        'Refine': ('Organize','Refine','Review'),
+        'Translate': ('Translate','Refine','Review'),
+        'Respond': ('Understand','Compose','Review'),
+    }
 
     def __init__(self, cfg):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
@@ -514,59 +663,112 @@ class Bubble(QWidget):
         self.session_kind = ''
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_actions)
-        self.setFixedSize(self.configured_width(), 36)
+        self.setFixedSize(self.configured_width(), self.configured_height())
+        self.motion=FloatingMotion(self)
+        self._state_animation=None
         self._processing = False
         self._state_name = 'Ready'
         self._event_progress = False
         self._progress_step = 'Starting'
         self._detail = ''
         self._demo = False
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 4, 7, 4)
+        outer=QHBoxLayout(self);outer.setContentsMargins(0,0,0,0)
+        self.contents=QWidget();outer.addWidget(self.contents)
+        layout = QHBoxLayout(self.contents)
+        inset=(self.configured_height()-32)//2
+        layout.setContentsMargins(inset, 4, inset, 4)
         layout.setSpacing(5)
+        self.row = layout
         self.brand = button('', self.open_main.emit)
         self.brand.setIcon(line_icon('waveform', 13, '#c7b8fa'))
         self.brand.setToolTip('Open MurMur')
         self.brand.hide()
         self.wave = Wave()
+        self.wave.setMinimumWidth(12)
+        self.wave.setMaximumWidth(16777215)
+        self.wave.setFixedHeight(28)
+        self.wave.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mode_mark = QLabel()
+        self.mode_mark.setFixedSize(20,24)
+        self.mode_mark.hide()
         self.progress = ProcessingMark(self)
+        self.progress.changed.connect(self._progress_changed)
         self.status = QLabel('Ready')
-        self.status.setStyleSheet('color:#eeeaf7;font-size:11px;')
+        self.status.setStyleSheet('color:#f5f1fc;font-size:13px;font-weight:500;')
         self.status.setMinimumWidth(0)
         self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.percentage = QLabel('0%')
-        self.percentage.setFixedWidth(29)
-        self.percentage.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.percentage.setStyleSheet('color:#ddd3f6;font-size:11px;font-weight:600;')
+        self.percentage.setFixedWidth(44)
+        self.percentage.setAlignment(Qt.AlignCenter)
+        self.percentage.setStyleSheet('color:#f5edff;font-size:15px;font-weight:600;')
         self.percentage.hide()
         self.mic = button('', self.toggle.emit)
         self.mic.setIcon(line_icon('mic', 13, '#ddd3f6'))
         self.mic.setToolTip('Start recording')
         self.close = button('', self.cancel.emit)
-        self.close.setIcon(line_icon('close', 12, '#a4a0ad'))
+        self.close.setIcon(line_icon('close', 22, '#ded5e9'))
         self.close.setToolTip('Cancel')
         self.close.setAccessibleName('Cancel current session')
         for w in (self.brand, self.mic, self.close):
-            w.setFixedSize(22, 22)
-            w.setIconSize(QSize(13, 13))
+            w.setFixedSize(32, 32)
+            w.setIconSize(QSize(22, 22))
             w.setFocusPolicy(Qt.NoFocus)
-            w.setStyleSheet('QPushButton{background:transparent;border:0;border-radius:7px;padding:0;min-height:0;}QPushButton:hover{background:#3e354c;}')
+            w.setStyleSheet('QPushButton{background:#37303f;border:0;border-radius:16px;padding:0;min-height:32px;}QPushButton:hover{background:#4a3d59;}QPushButton:pressed{background:#302937;}')
+        self.mic.setStyleSheet('QPushButton{background:#655080;border:1px solid #80689e;border-radius:16px;padding:0;min-height:30px;}QPushButton:hover{background:#7a609b;}QPushButton:pressed{background:#57446e;}')
         layout.addWidget(self.close)
+        layout.addWidget(self.mode_mark)
         layout.addWidget(self.wave)
         layout.addWidget(self.status, 1)
         layout.addWidget(self.percentage)
         layout.addWidget(self.mic)
 
     def configured_width(self):
-        return max(156, min(180, int(self.cfg.get('bubble_width', 168))))
+        return number(self.cfg,'bubble_width',224,200,360)
+
+    def configured_height(self):return number(self.cfg,'bubble_height',44,40,64)
+
+    def show(self):self.motion.show()
+
+    def hide(self):
+        self._stop_state_animation()
+        self.motion.hide()
+
+    def _stop_state_animation(self):
+        if self._state_animation:
+            self._state_animation.stop();self._state_animation.deleteLater();self._state_animation=None
+        self.contents.setGraphicsEffect(None)
+
+    def animate_state(self):
+        self._stop_state_animation()
+        if not self.cfg.get('bubble_state_motion',True):return
+        effect=QGraphicsOpacityEffect(self.contents);effect.setOpacity(.35);self.contents.setGraphicsEffect(effect)
+        animation=QPropertyAnimation(effect,b'opacity',self);animation.setStartValue(.35);animation.setEndValue(1.)
+        animation.setDuration(max(100,duration(self.cfg)*2//3));animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._state_animation=animation
+        def finished():
+            if self._state_animation is animation:self._stop_state_animation()
+        animation.finished.connect(finished);animation.start()
 
     def set_session_kind(self,kind):
+        kind='Translation' if kind in ('翻译','Translation') else 'Ask Anything' if kind in ('随便问','Ask Anything') else ''
+        changed=kind!=self.session_kind
         self.session_kind=kind
+        name,icon,color,*_=self.MODE_STYLES[kind]
+        self.mode_mark.setPixmap(line_icon(icon,20,color).pixmap(20,20))
+        self.mode_mark.setToolTip(name)
+        self.mode_mark.setAccessibleName(name+' mode')
+        self.mode_mark.setVisible(bool(kind))
+        if self._processing:self._update_processing_text()
+        self.wave.color=color
+        self.wave.update()
+        if changed and self.isVisible():self.animate_state()
+        self.update()
 
     def show_actions(self,point):
         menu=QMenu(self)
-        action=menu.addAction('Stop Ask Anything' if self.session_kind else 'Ask Anything',self.ask.emit)
-        action.setEnabled(not self.isVisible() or bool(self.session_kind) and self.wave.active)
+        is_ask=self.session_kind=='Ask Anything'
+        action=menu.addAction('Stop Ask Anything' if is_ask else 'Ask Anything',self.ask.emit)
+        action.setEnabled(not self.isVisible() or is_ask and self.wave.active)
         menu.addAction('Open MurMur',self.open_main.emit)
         menu.addAction('Cancel',self.cancel.emit)
         menu.exec(self.mapToGlobal(point))
@@ -576,33 +778,57 @@ class Bubble(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(1, 1, self.width() - 2, self.height() - 2)
         clip = QPainterPath()
-        clip.addRoundedRect(rect, 17, 17)
+        clip.addRoundedRect(rect, self.height()/2-1, self.height()/2-1)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor('#242128'))
         p.drawPath(clip)
         if self._processing:
             p.save()
             p.setClipPath(clip)
-            p.fillRect(QRectF(rect.left(), rect.top(), rect.width() * self.progress.display_fraction, rect.height()), QColor('#514269'))
+            p.fillRect(QRectF(rect.left(), rect.top(), rect.width() * self.progress.display_fraction, rect.height()), QColor(self.MODE_STYLES[self.session_kind][3]))
+            if self.cfg.get('bubble_state_motion',True) and self.progress.estimated and self.progress.display_fraction>.05:
+                # A soft moving sheen remains active during very long waits.
+                edge=rect.left()+rect.width()*self.progress.display_fraction
+                x=rect.left()+(self.progress._clock()%2.5)/2.5*(edge-rect.left()+36)-36
+                p.setClipRect(QRectF(rect.left(),rect.top(),edge-rect.left(),rect.height()),Qt.IntersectClip)
+                sheen=QLinearGradient(x,0,x+36,0)
+                sheen.setColorAt(0,QColor(255,255,255,0))
+                sheen.setColorAt(.5,QColor(255,255,255,24))
+                sheen.setColorAt(1,QColor(255,255,255,0))
+                p.fillRect(QRectF(x,rect.top(),36,rect.height()),sheen)
             p.restore()
-        p.setPen(QPen(QColor('#625276' if self._processing else '#48404f'), 1))
+        p.setPen(QPen(QColor(self.MODE_STYLES[self.session_kind][4 if self._processing else 5]), 1))
         p.setBrush(Qt.NoBrush)
         p.drawPath(clip)
 
     def set_progress(self, step, completed_steps, total_steps):
-        """Report completed pipeline steps, never model-internal progress."""
+        """Anchor an estimate to actual completed pipeline steps."""
         aliases = {'Transcribing': 'Transcribe', 'Refining': 'Polish', '听写': 'Polish', '翻译': 'Translate', '润色': 'Refine', '总结': 'Summarize', '扩写': 'Expand', '自定义': 'Edit', '语音指令': 'Edit'}
         step = aliases.get(str(step), str(step))
         allowed = {'Starting', 'Stopping', 'Transcribe', 'Polish', 'Translate', 'Respond', 'Refine', 'Summarize', 'Expand', 'Edit'}
         self._progress_step = step if step in allowed else 'Transcribe'
+        self.progress.set_step(self._progress_step)
         self._event_progress = True
         self.progress.set_progress(completed_steps, total_steps)
         if self._processing:
             self._update_processing_text()
         self.update()
 
+    def _progress_changed(self):
+        if self._processing:
+            previous=self.status.text();self._update_processing_text()
+            if self.status.text()!=previous and self.isVisible():self.animate_state()
+
     def _update_processing_text(self):
         step = self._progress_step
+        if step in self.WAIT_PHASES and self.progress.estimated:
+            elapsed=self.progress.step_elapsed
+            step=self.WAIT_PHASES[step][0 if elapsed<12 else 1 if elapsed<38 else 2]
+        # At the narrowest/tallest size, keep the stage and percentage fully
+        # readable. The mode remains in the tooltip/accessibility description.
+        inset=max(0,(self.configured_height()-32)//2)
+        with_icon=self.configured_width()-2*inset-8-32-self.percentage.width()-20-3*self.row.spacing()
+        self.mode_mark.setVisible(bool(self.session_kind) and self.status.fontMetrics().horizontalAdvance(step)<=with_icon)
         if self._demo:
             self.status.setText(f'<span style="font-size:11px">{step}</span><br><span style="font-size:9px;color:#c7b8fa">Demo</span>')
         else:
@@ -613,33 +839,38 @@ class Bubble(QWidget):
             tooltip += ' · ' + self._detail
         if self.session_kind:
             tooltip = self.session_kind + ' · ' + tooltip
-        tooltip += f' · Completed processing steps: {self.progress.completed_steps} of {self.progress.total_steps} ({self.progress.percentage}%). Not model-internal progress.'
+        qualifier='Estimated progress' if self.progress.estimated else 'Completed'
+        tooltip += f' · {qualifier}: {self.progress.percentage}%. Completed processing steps: {self.progress.completed_steps} of {self.progress.total_steps}. Not model-internal progress.'
+        if self._progress_step in self.WAIT_PHASES and self.progress.estimated:
+            tooltip+=' '+ ' / '.join(self.WAIT_PHASES[self._progress_step])+' are estimated UI phases of one model request, not separate server-reported tasks.'
         self.status.setToolTip(tooltip)
         self.percentage.setToolTip(tooltip)
-        self.status.setAccessibleName(('Demo · ' if self._demo else '') + f'{step} · {self.progress.percentage}% of processing steps complete')
-        self.percentage.setAccessibleName(f'{self.progress.percentage}% of processing steps complete')
+        description=('Estimated progress: ' if self.progress.estimated else 'Completed: ')+f'{self.progress.percentage}%'
+        self.status.setAccessibleName((self.session_kind+' · ' if self.session_kind else '') + ('Demo · ' if self._demo else '') + f'{step} · {description}')
+        self.percentage.setAccessibleName(description)
         self.setAccessibleName(self.status.accessibleName())
         self.setToolTip(tooltip)
 
     def position(self):
-        self.setFixedSize(self.configured_width(), 36)
-        screens = QApplication.screens()
-        if not screens:
-            return
-        screen = screens[max(0, min(int(self.cfg.get('bubble_screen', 0)), len(screens) - 1))]
-        rect = screen.availableGeometry()
-        offset = max(0, int(self.cfg.get('bubble_offset', 48)))
-        y = rect.bottom() - self.height() - offset if self.cfg.get('bubble_position', 'bottom') == 'bottom' else rect.top() + offset
-        y = max(rect.top(), min(y, rect.bottom() - self.height()))
-        self.move(rect.center().x() - self.width() // 2, y)
+        self.motion.stop_enter();self.motion.target=None
+        self.setFixedSize(self.configured_width(), self.configured_height())
+        target=placement(self.cfg,self.size());self.setFixedSize(target.size());self.setGeometry(target)
+        inset=max(0,(self.height()-32)//2)
+        self.row.setContentsMargins(inset,4,inset+8 if self._processing else inset,4)
+        self.wave.set_animated(self.cfg.get('bubble_wave_motion',True))
+        self.wave.set_style(self.cfg.get('bubble_wave_style','bars'))
 
     def state(self, state, detail='', demo=False):
         name = self.STATE_NAMES.get(state, state)
         visible = name in ('Starting', 'Recording', 'Stopping', 'Transcribing', 'Refining')
         changed = name != self._state_name
+        was_visible=self.isVisible()
         self._state_name, self._detail, self._demo = name, detail, bool(demo)
         self.wave.set_recording(name == 'Recording', demo=demo)
         self._processing = visible and name != 'Recording'
+        if not self._processing:self.mode_mark.setVisible(bool(self.session_kind))
+        inset=max(0,(self.configured_height()-32)//2)
+        self.row.setContentsMargins(inset,4,inset+8 if self._processing else inset,4)
         self.progress.set_running(self._processing)
         self.percentage.setVisible(self._processing)
         self.wave.setVisible(name == 'Recording')
@@ -649,16 +880,28 @@ class Bubble(QWidget):
             self.progress.set_progress(0, 1, animate=False)
         elif changed and not self._event_progress:
             self._progress_step = {'Transcribing': 'Transcribe', 'Refining': 'Polish'}.get(name, name)
-            self.progress.set_progress(1 if name == 'Refining' else 0, 2, animate=False)
+            self.progress.set_progress(1 if name == 'Refining' else 0, 2)
+        self.progress.set_step(self._progress_step)
         timing = re.search(r'\b\d{1,2}:\d{2}\b', detail) if self.wave.active else None
-        display = timing.group() if timing else name
+        display = timing.group() if timing else '0:00' if self.wave.active else name
+        # The waveform occupies the available recording space. The timer is
+        # only as wide as its digits, immediately beside the stop action.
+        self.row.setStretch(self.row.indexOf(self.wave), 1 if self.wave.active else 0)
+        self.row.setStretch(self.row.indexOf(self.status), 0 if self.wave.active else 1)
+        if self.wave.active:
+            self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self.status.setFixedWidth(max(38,self.status.fontMetrics().horizontalAdvance(display)+4))
+        else:
+            self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.status.setMinimumWidth(0)
+            self.status.setMaximumWidth(16777215)
         if demo:
             self.status.setText(f'<span style="font-size:11px">{display}</span><br><span style="font-size:9px;color:#b5a2df">Demo</span>')
         else:
             self.status.setText(display)
         self.mic.setVisible(name == 'Recording')
         self.mic.setEnabled(name == 'Recording')
-        self.mic.setIcon(line_icon('check', 13, '#fcfaff'))
+        self.mic.setIcon(line_icon('check', 22, '#fcfaff'))
         self.mic.setToolTip('Stop recording' if name == 'Recording' else 'Recording is not active')
         self.mic.setAccessibleName('Stop recording')
         tooltip = ('Demo · simulated session · ' if demo else '') + name + (' · ' + detail if detail else '')
@@ -666,13 +909,15 @@ class Bubble(QWidget):
         if demo and self.wave.active:
             tooltip += ' · simulated waveform'
         self.status.setToolTip(tooltip)
-        self.status.setAccessibleName(('Demo · ' if demo else '') + name)
+        self.status.setAccessibleName((self.session_kind+' · ' if self.session_kind else '') + ('Demo · ' if demo else '') + name)
         self.setAccessibleName(self.status.accessibleName())
         self.setToolTip(self.status.toolTip())
         if self._processing:
             self._update_processing_text()
         self.update()
+        if changed and visible and was_visible:self.animate_state()
         if visible != self.isVisible():
+            if visible:self.position()
             self.show() if visible else self.hide()
 
 
@@ -686,12 +931,14 @@ class ResultBubble(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.cfg = cfg
         self.text = ''
+        self.motion=FloatingMotion(self)
         self._display_text = ''
         self.demo = False
         self._morph_generation = 0
         self._morph = None
         self._target_geometry = QRect()
-        self.setFixedWidth(360)
+        self._morph_start_height = 44
+        self.setFixedWidth(number(cfg,'bubble_result_width',400,320,640))
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSizeConstraint(QLayout.SetNoConstraint)
@@ -699,34 +946,41 @@ class ResultBubble(QWidget):
         outer.addWidget(self.contents)
         self.body = QVBoxLayout(self.contents)
         self.body.setSizeConstraint(QLayout.SetNoConstraint)
-        self.body.setContentsMargins(12, 9, 12, 9)
-        self.body.setSpacing(7)
+        self.body.setContentsMargins(14, 14, 14, 14)
+        self.body.setSpacing(8)
         self.status = label('Result ready', 'muted')
-        self.status.setWordWrap(False)
-        self.status.setStyleSheet('font-size:11px;color:#b9aecb;')
-        self.body.addWidget(self.status)
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet('font-size:12px;color:#b9aecb;')
+        header=QHBoxLayout();header.setSpacing(10);header.addWidget(self.status,1)
+        self.dismiss_button=button('',self.hide)
+        self.dismiss_button.setIcon(line_icon('close',22,'#ded5e9'));self.dismiss_button.setIconSize(QSize(22,22))
+        self.dismiss_button.setFixedSize(32,32);self.dismiss_button.setFocusPolicy(Qt.NoFocus)
+        self.dismiss_button.setAccessibleName('Dismiss result');self.dismiss_button.setToolTip('Dismiss result')
+        self.dismiss_button.setStyleSheet('QPushButton{background:#37303f;border:0;border-radius:16px;padding:0;min-height:32px;}QPushButton:hover{background:#4a3d59;}QPushButton:pressed{background:#302937;}')
+        header.addWidget(self.dismiss_button);self.body.addLayout(header)
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setFocusPolicy(Qt.NoFocus)
         self.preview.setContextMenuPolicy(Qt.NoContextMenu)
         self.preview.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.preview.setStyleSheet('QPlainTextEdit{border:0;background:transparent;padding:0;color:#eeeaf4;}')
+        self.preview.setStyleSheet('QPlainTextEdit{border:0;background:transparent;padding:0;color:#f5f1fa;font-size:15px;}')
+        self.preview.document().setDocumentMargin(0)
         self.body.addWidget(self.preview)
         actions = QHBoxLayout()
-        actions.setSpacing(6)
+        actions.setSpacing(8)
         self.copy_button = button('Copy', self.copy_result)
         self.copy_button.setToolTip('Copy the full result')
         self.edit_button = button('Edit', self.edit_result)
         self.edit_button.setToolTip('Open the editor')
-        self.dismiss_button = button('Dismiss', self.hide)
-        for control in (self.copy_button, self.edit_button, self.dismiss_button):
+        self.copy_button.setIcon(line_icon('copy',18,'#352b49'));self.edit_button.setIcon(line_icon('edit',18,'#ded5e9'))
+        for control in (self.copy_button, self.edit_button):
+            control.setIconSize(QSize(18,18))
             control.setFocusPolicy(Qt.NoFocus)
-            control.setStyleSheet('QPushButton{padding:3px 9px;min-height:18px;}')
-        actions.addWidget(self.copy_button)
-        actions.addWidget(self.edit_button)
-        actions.addStretch()
-        actions.addWidget(self.dismiss_button)
+            control.setStyleSheet('QPushButton{padding:5px 12px;min-height:22px;border-radius:16px;font-size:13px;}')
+        self.copy_button.setObjectName('primary')
+        actions.addWidget(self.copy_button,1)
+        actions.addWidget(self.edit_button,1)
         self.body.addLayout(actions)
 
     def paintEvent(self, event):
@@ -734,18 +988,29 @@ class ResultBubble(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(QPen(QColor('#51465f'), 1))
         painter.setBrush(QColor('#28242e'))
-        radius = 13
-        if self._morph is not None and self._target_geometry.height() > 36:
-            expanded = max(0., min(1., (self.height() - 36) / (self._target_geometry.height() - 36)))
-            radius = 17 - 4 * expanded
+        # Outer corner centers are 30 px from the edge. The 32 px dismissal
+        # circle and 16 px action corners, inset by 14 px, share those centers.
+        radius = 29
+        if self._morph is not None and self._target_geometry.height() > self._morph_start_height:
+            expanded = max(0., min(1., (self.height() - self._morph_start_height) / (self._target_geometry.height() - self._morph_start_height)))
+            origin_radius=self._morph_start_height/2-1
+            radius = origin_radius+(29-origin_radius)*expanded
         painter.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, radius, radius)
 
     def copy_result(self):
         if not self.text.strip():
             return
-        QApplication.clipboard().setText(self.text)
+        try:
+            clipboard=QApplication.clipboard()
+            clipboard.setText(self.text)
+            if clipboard.text()!=self.text:raise RuntimeError()
+        except Exception:
+            self.status.setText('Copy failed · Try again')
+            self.status.setToolTip(self.status.text())
+            return
         self.status.setText(('Demo · ' if self.demo else '') + 'Copied to clipboard')
         self.status.setToolTip(self.status.text())
+        self.hide()
 
     def show_result(self, text, *, demo=False, status='Result ready', source=None, status_summary=None):
         if not text.strip():
@@ -768,7 +1033,9 @@ class ResultBubble(QWidget):
 
     def _show_content(self, display_text, copy_text, *, demo, status, source, status_summary, error_message=''):
         self._cancel_morph()
-        self.setFixedWidth(360)
+        if isinstance(source,Bubble):source.motion.stop_enter()
+        self.setFixedWidth(number(self.cfg,'bubble_result_width',400,320,640))
+        self.position()
         self.text = copy_text
         self._display_text = display_text
         self.demo = bool(demo)
@@ -781,20 +1048,28 @@ class ResultBubble(QWidget):
         self.edit_button.setToolTip('Review the original transcript and retry refinement in the editor' if error_message else 'Open the editor')
         self.preview.setPlainText(display_text)
         prefix = 'Demo · ' if demo else ''
-        self.status.setText(prefix + (status_summary or status))
+        heading=prefix+(status_summary or status)
+        heading=self.status.fontMetrics().elidedText(heading,Qt.ElideRight,max(40,(self.width()-80)*2))
+        self.status.setText(heading)
+        self.status.setMaximumHeight(self.status.fontMetrics().lineSpacing()*3)
+        self.status.setAccessibleName(prefix+status)
         self.status.setToolTip(prefix + status + (' · ' + error_message if error_message else ''))
-        self.status.setStyleSheet('font-size:11px;color:' + ('#e4b1ae;' if error_message else '#b9aecb;'))
-        bounds = self.preview.fontMetrics().boundingRect(QRect(0, 0, self.width() - 34, 100000), Qt.TextWordWrap, display_text)
-        self.preview.setFixedHeight(max(32, min(94, bounds.height() + 18)))
-        self.setFixedHeight(min(180, self.body.sizeHint().height()))
+        self.status.setStyleSheet('font-size:12px;color:' + ('#e4b1ae;' if error_message else '#b9aecb;'))
+        self.preview.ensurePolished()
+        bounds = self.preview.fontMetrics().boundingRect(QRect(0, 0, self.width() - 36, 100000), Qt.TextWordWrap, display_text)
+        self.preview.setFixedHeight(max(26, min(144, bounds.height() + 6)))
+        self.body.invalidate()
+        self.setFixedHeight(min(280, self.body.totalHeightForWidth(self.width())))
         self.position()
         self._target_geometry = QRect(self.geometry())
         if source is not None:
             self.morph_from(source)
         elif not self.isVisible():
-            self.show()
+            self.motion.show()
 
     def _cancel_morph(self):
+        self.motion.follow.stop()
+        self.motion.stop_enter();self.motion.target=None
         self._morph_generation += 1
         if self._morph is not None:
             self._morph.stop()
@@ -804,7 +1079,7 @@ class ResultBubble(QWidget):
 
     def hide(self):
         self._cancel_morph()
-        super().hide()
+        self.motion.hide()
 
     def hideEvent(self, event):
         self._cancel_morph()
@@ -814,8 +1089,12 @@ class ResultBubble(QWidget):
         if not self._display_text.strip():
             return
         start = QRect(source.geometry() if isinstance(source, QWidget) else source)
+        self._morph_start_height=start.height()
         target = QRect(self._target_geometry if not self._target_geometry.isEmpty() else self.geometry())
         self._cancel_morph()
+        if isinstance(source,Bubble):source.motion.skip_exit=True
+        if not self.cfg.get('bubble_state_motion',True):
+            self.setFixedSize(target.size());self.setGeometry(target);self.show();self.motion.follow.start();return
         generation = self._morph_generation
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
@@ -825,12 +1104,12 @@ class ResultBubble(QWidget):
         self.contents.setGraphicsEffect(effect)
         animation = QParallelAnimationGroup(self)
         geometry = QPropertyAnimation(self, b'geometry', animation)
-        geometry.setDuration(240)
+        geometry.setDuration(duration(self.cfg))
         geometry.setStartValue(start)
         geometry.setEndValue(target)
         geometry.setEasingCurve(QEasingCurve.OutCubic)
         opacity = QPropertyAnimation(effect, b'opacity', animation)
-        opacity.setDuration(240)
+        opacity.setDuration(duration(self.cfg))
         opacity.setStartValue(0.)
         opacity.setEndValue(1.)
         opacity.setEasingCurve(QEasingCurve.InCubic)
@@ -844,6 +1123,7 @@ class ResultBubble(QWidget):
                 self.setFixedSize(target.size())
                 self.setGeometry(target)
                 self.contents.setGraphicsEffect(None)
+                self.motion.follow.start()
             animation.deleteLater()
 
         animation.finished.connect(finished)
@@ -852,16 +1132,8 @@ class ResultBubble(QWidget):
         animation.start()
 
     def position(self):
-        screens = QApplication.screens()
-        if not screens:
-            return
-        index = max(0, min(int(self.cfg.get('bubble_screen', 0)), len(screens) - 1))
-        rect = screens[index].availableGeometry()
-        self.setFixedWidth(min(360, rect.width() - 16))
-        offset = max(0, int(self.cfg.get('bubble_offset', 48)))
-        y = rect.bottom() - self.height() - offset if self.cfg.get('bubble_position', 'bottom') == 'bottom' else rect.top() + offset
-        x = rect.center().x() - self.width() // 2
-        self.move(max(rect.left(), min(x, rect.right() - self.width() + 1)), max(rect.top(), min(y, rect.bottom() - self.height() + 1)))
+        target=placement(self.cfg,QSize(number(self.cfg,'bubble_result_width',400,320,640),self.height()))
+        self.setFixedSize(target.size());self.move(target.topLeft())
 
 
 class Preview(QDialog):
@@ -946,7 +1218,14 @@ class Preview(QDialog):
     def copy_result(self):
         text = self.result.toPlainText()
         if text.strip() and not self._session_busy:
-            QApplication.clipboard().setText(text)
+            try:
+                clipboard=QApplication.clipboard()
+                clipboard.setText(text)
+                if clipboard.text()!=text:raise RuntimeError()
+            except Exception:
+                self.notice.setText('Copy failed. Your edited text is preserved; try again.')
+                return
+            if self.editor_context in ('result','assistant'):self.accept()
 
     def apply_result(self):
         text = self.result.toPlainText()
@@ -1065,6 +1344,10 @@ class SettingsForm(QMainWindow):
                 w.addItem(text, data)
             w.setCurrentIndex(max(0, w.findData(value)))
             layout.addRow(title, w)
+        elif kind == 'model':
+            from .model_picker import ModelPicker
+            w = ModelPicker(str(value))
+            layout.addRow(title,w)
         elif kind == 'price':
             w = QLineEdit('' if value is None else str(value))
             w.setProperty('usd_price', True)

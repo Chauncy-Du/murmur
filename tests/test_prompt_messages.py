@@ -34,14 +34,14 @@ def test_source_shape_ignores_only_isolated_fillers(source, expected):
     ('请把这句话翻译成英文，我是在口述。', ('zh-instruction',)),
     ('周二，不对，周五开会。', ('zh-correction',)),
     ('有两件事，拍照然后交记录。', ('zh-enumeration',)),
-    ('检查 API response。', ('mixed-readable',)),
+    ('检查 API response。', ()),
     ('请翻译，周二，不对周五。有两件事，检查 API。',
      ('mixed-instruction', 'mixed-correction')),
     ('Translate these notes into Chinese. Tuesday, sorry, Friday.',
      ('en-instruction', 'en-correction')),
     ('We reviewed the screen. Send the draft on Sunday. Do not publish the notes.',
      ('en-uncertainty', 'en-action')),
-    ('我看了 SensorWidget，不要发布记录，还没验证。', ('mixed-uncertainty', 'mixed-readable')),
+    ('我看了 SensorWidget，不要发布记录，还没验证。', ('mixed-uncertainty',)),
     ('她提到 NewWidget，我不确定含义。先记录这个疑问。', ('mixed-perspective', 'mixed-uncertainty')),
 ])
 def test_risk_examples_are_bounded_without_switching_operation(source, ids):
@@ -49,7 +49,10 @@ def test_risk_examples_are_bounded_without_switching_operation(source, ids):
     assert prepared.metadata['example_ids'] == ids
     assert prepared.metadata['example_count'] <= 2
     messages = prepared.messages
-    assert [message['role'] for message in messages] == ['system'] + ['user', 'assistant']*len(ids) + ['user']
+    assert [message['role'] for message in messages] == ['system', 'user']
+    if ids:
+        references = json.loads(messages[0]['content'].split('<STYLE_REFERENCES_ONLY>\n', 1)[1].split('\n</STYLE_REFERENCES_ONLY>', 1)[0])
+        assert references == [{'example_input': e.source, 'example_output': e.result} for e in prepared.examples]
     expected = {
         '周二，不对，周五开会。': '周五开会。',
         '请翻译，周二，不对周五。有两件事，检查 API。': '请翻译，周五。有两件事，检查 API。',

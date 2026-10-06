@@ -54,6 +54,7 @@ def test_voice_steps_advance_only_after_actual_recognition_and_valid_result(cont
     c.store.config['polish'] = polish
     c.toggle(mode)
     s = c.session
+    assert c.bubble.session_kind==('Ask Anything' if mode=='随便问' else 'Translation' if mode=='翻译' else '')
     assert s.steps == steps and not c.progress_reports
     c.stop()
     assert s.phase == '等待停止' and not c.progress_reports
@@ -66,7 +67,8 @@ def test_voice_steps_advance_only_after_actual_recognition_and_valid_result(cont
     if len(steps) > 1:
         c.receive(s.id, 'phase', '整理')
         assert c.bubble.status.text().startswith('<span')  # Demo remains marked.
-        assert steps[-1] in c.bubble.status.text() and 'Thinking' not in c.bubble.status.text()
+        display={'Polish':'Organize','Translate':'Translate','Respond':'Understand'}.get(steps[-1],steps[-1])
+        assert display in c.bubble.status.text() and 'Thinking' not in c.bubble.status.text()
     result = AskResult('answer', 'Valid fixture answer') if s.assistant else 'Valid fixture text'
     c.receive(s.id, 'result', result)
     assert c.session is None
@@ -106,7 +108,7 @@ def test_failure_cancel_and_late_callbacks_never_complete_progress(controller, a
     assert c.store.rows()[0]['raw'] == 'Preserved fixture'
 
 
-def test_success_completes_before_automatic_clipboard_copy(controller, monkeypatch):
+def test_success_completes_before_explicit_fallback_copy(controller, monkeypatch):
     c = controller
     cfg = dict(c.store.config, demo=False)
     s = Session('听写', cfg, None, raw='Public original', phase='整理')
@@ -121,7 +123,10 @@ def test_success_completes_before_automatic_clipboard_copy(controller, monkeypat
 
     monkeypatch.setattr(c.app, 'clipboard', lambda: Clipboard())
     c.receive(s.id, 'result', 'Public result')
-    assert writes == ['Public result']
+    assert writes == []
+    monkeypatch.setattr(QApplication,'clipboard',staticmethod(lambda:Clipboard()))
+    c.result_bubble.copy_result()
+    assert writes == ['Public result'] and not c.result_bubble.isVisible()
 
 
 def test_canceled_session_with_late_error_does_not_show_complete(controller):

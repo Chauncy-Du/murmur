@@ -10,6 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from PySide6.QtWidgets import QApplication
 from .clipboard import ClipboardBusy
+from .paste_receipts import PasteReceipts,MAX_DOCUMENT_CHARS
 
 @dataclass(frozen=True)
 class Target:
@@ -43,6 +44,43 @@ def _native_target():
 
 def _native_equal(first,second):
     return bool(first and second and (first.hwnd,first.focus,first.pid)==(second.hwnd,second.focus,second.pid))
+
+
+def _edit_message(hwnd,message,wparam=0,lparam=0):
+    """Bounded native EDIT messages with a short timeout for unresponsive apps."""
+    send=ctypes.windll.user32.SendMessageTimeoutW
+    send.argtypes=(ctypes.c_void_p,ctypes.c_uint,ctypes.c_size_t,ctypes.c_ssize_t,
+                   ctypes.c_uint,ctypes.c_uint,ctypes.POINTER(ctypes.c_size_t))
+    send.restype=ctypes.c_size_t
+    answer=ctypes.c_size_t()
+    if not send(hwnd,message,wparam,lparam,2,100,ctypes.byref(answer)):return None
+    return answer.value
+
+
+def _native_edit_state(expected):
+    import win32gui,win32con
+    if not window_valid(expected):return None
+    if win32gui.GetClassName(expected.focus).casefold() not in ('edit','richedit','richedit20a','richedit20w','richedit50w'):return None
+    if win32gui.GetWindowLong(expected.focus,win32con.GWL_STYLE)&(win32con.ES_PASSWORD|win32con.ES_READONLY):return None
+    start=ctypes.c_ulong();end=ctypes.c_ulong()
+    if _edit_message(expected.focus,win32con.EM_GETSEL,ctypes.addressof(start),ctypes.addressof(end)) is None:return None
+    length=_edit_message(expected.focus,win32con.WM_GETTEXTLENGTH)
+    if length is None or length>MAX_DOCUMENT_CHARS*2 or not 0<=start.value<=end.value<=length:return None
+    return (start.value,end.value),length
+
+
+def insert_native_edit(expected,text,*,guard=None,receipt=None):
+    """Insert into a confirmed standard EDIT/RichEdit, preserving the clipboard."""
+    import win32con
+    if not isinstance(text,str) or not text.strip() or '\0' in text:return False
+    if not valid(expected) or _native_edit_state(expected) is None:return False
+    if receipt and not paste_ready(expected,receipt):raise RuntimeError('The cursor or input changed · Copy to use')
+    if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
+    if not window_valid(expected):raise RuntimeError('The target changed · Copy to use')
+    buffer=ctypes.create_unicode_buffer(text)
+    if _edit_message(expected.focus,win32con.EM_REPLACESEL,1,ctypes.addressof(buffer)) is None:
+        raise RuntimeError('Input did not confirm delivery · Review your result')
+    return True
 
 class _SelectionBookmarks:
     """MTA-owned COM ranges. Tokens are the only values crossing threads."""
@@ -178,10 +216,11 @@ class _FocusReader:
     Provider calls can hang. A bounded queue refuses new requests and callers
     then get an unknown identity. Context reads are bounded and exclude password
     fields. Only focused selected text can leave this worker; caret surroundings
-    are hashed locally and never returned.
+    and bounded document reads for paste receipts are hashed locally and never returned.
     """
     def __init__(self):
         self.requests=queue.Queue(maxsize=1)
+        self.initialization_error=''
         self.thread=threading.Thread(target=self._run,name='MurMur-UIA',daemon=True)
         self.thread.start()
     def read(self,native,timeout=.08):
@@ -208,24 +247,29 @@ class _FocusReader:
             comtypes.client.gen_dir=None
             types=comtypes.client.GetModule('UIAutomationCore.dll')
             automation=comtypes.client.CreateObject(types.CUIAutomation,interface=types.IUIAutomation)
-        except Exception:automation=None
-        bookmarks=_SelectionBookmarks();contexts=_ContextBookmarks()
+        except Exception as exc:
+            automation=None
+            self.initialization_error=type(exc).__name__+': '+str(exc)
+        bookmarks=_SelectionBookmarks();contexts=_ContextBookmarks();receipts=PasteReceipts()
         while True:
             # A separate frame releases returned text before waiting on the
             # next request. Only COM ranges and hashes live in the caches.
-            self._serve(self.requests.get(),automation,types,bookmarks,contexts)
+            self._serve(self.requests.get(),automation,types,bookmarks,contexts,receipts)
     @staticmethod
-    def _serve(request,automation,types,bookmarks,contexts):
+    def _serve(request,automation,types,bookmarks,contexts,receipts=None):
         operation,native,payload,done,result,deadline=request
         bookmarks._expire();contexts._expire()
+        if receipts is not None:receipts._expire()
         try:
             if time.monotonic()>=deadline:return
-            answer=_FocusReader._answer(automation,types,operation,native,payload,bookmarks,contexts)
+            answer=_FocusReader._answer(automation,types,operation,native,payload,bookmarks,contexts,receipts)
             if answer is not None and time.monotonic()<deadline:result.append(answer)
         except Exception:pass
         finally:done.set()
     @staticmethod
-    def _answer(automation,types,operation,native,payload,bookmarks,contexts):
+    def _answer(automation,types,operation,native,payload,bookmarks,contexts,receipts=None):
+        if operation=='forget_paste' and receipts is not None:
+            receipts.forget(native,payload);return True
         if automation is None or not _native_equal(native,_native_target()):return None
         element=automation.GetFocusedElement()
         runtime_id=tuple(element.GetRuntimeId());pid=int(element.CurrentProcessId)
@@ -248,11 +292,28 @@ class _FocusReader:
         if operation=='focus':return identity
         if Target(native.hwnd,native.focus,native.pid,*identity)!=native or password:return None
         if operation not in ('context','context_matches') and not native.editable:return None
-        pattern=element.GetCurrentPattern(types.UIA_TextPatternId).QueryInterface(types.IUIAutomationTextPattern)
+        try:pattern=element.GetCurrentPattern(types.UIA_TextPatternId).QueryInterface(types.IUIAutomationTextPattern)
+        except Exception:
+            if operation not in ('prepare_paste','paste_ready','paste_verified') or receipts is None:return None
+            state=_native_edit_state(native)
+            if state is None:return None
+            value_pattern=element.GetCurrentPattern(types.UIA_ValuePatternId).QueryInterface(types.IUIAutomationValuePattern)
+            if bool(value_pattern.CurrentIsReadOnly):return None
+            value=value_pattern.CurrentValue
+            if value is None and state[1]==0:value=''
+            if (not isinstance(value,str) or len(value)>MAX_DOCUMENT_CHARS or '\0' in value
+                    or len(value.encode('utf-16-le','surrogatepass'))//2!=state[1]):return None
+            if operation=='prepare_paste':answer=receipts.create_value(native,payload,value,state[0])
+            elif operation=='paste_ready':answer=receipts.ready_value(native,payload,value,state[0])
+            else:answer=receipts.verified_value(native,payload,value)
+            return answer if _native_equal(native,_native_target()) else None
         if operation=='context':answer=contexts.create(native,pattern,types)
         elif operation=='context_matches':answer=contexts.matches(native,payload,pattern,types)
         elif operation=='bookmark':answer=bookmarks.create(native,pattern,types)
         elif operation=='matches':answer=bookmarks.matches(native,payload,pattern,types)
+        elif operation=='prepare_paste' and receipts is not None:answer=receipts.create(native,payload,pattern,types)
+        elif operation=='paste_ready' and receipts is not None:answer=receipts.ready(native,payload,pattern,types)
+        elif operation=='paste_verified' and receipts is not None:answer=receipts.verified(native,payload,pattern,types)
         else:return None
         return answer if _native_equal(native,_native_target()) else None
 
@@ -319,6 +380,26 @@ def context_matches(expected,context):
         if _reader is None:return False
         return bool(_reader.request('context_matches',expected,context) and window_valid(expected))
     except Exception:return False
+
+
+def prepare_paste(expected,text):
+    if not valid(expected) or _reader is None:return None
+    token=_reader.request('prepare_paste',expected,text,timeout=.2)
+    return token if isinstance(token,str) and valid(expected) else None
+
+
+def paste_ready(expected,token):
+    return bool(isinstance(token,str) and valid(expected) and _reader is not None
+                and _reader.request('paste_ready',expected,token,timeout=.2) and valid(expected))
+
+
+def paste_verified(expected,token):
+    return bool(isinstance(token,str) and valid(expected) and _reader is not None
+                and _reader.request('paste_verified',expected,token,timeout=.2) and valid(expected))
+
+
+def forget_paste(expected,token):
+    if isinstance(token,str) and _reader is not None:_reader.request('forget_paste',expected,token)
 
 def activate(expected):
     import win32gui

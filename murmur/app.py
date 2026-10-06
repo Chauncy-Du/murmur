@@ -17,6 +17,7 @@ from .ui import Bubble,ResultBubble,Preview,STYLE,icon
 from .dashboard import MainWindow
 from .version import __version__
 from . import windows
+from .result_review import ReviewAssessment
 
 @dataclass
 class Session:
@@ -54,6 +55,7 @@ class Controller(QObject):
         windows.prepare_text_context()
         super().__init__();self.app=app;self.store=store;self.session=None;self.pending=False;self.pending_generation=0;self.selection_target=None;self.selection_original='';self.selection_bookmark=None;self.clip_tx=None;self.capture_busy=False;self.capture_generation=0;self.capture_tx=None;self.input_epoch=0
         self.window=MainWindow(store);self.bubble=Bubble(store.config);self.result_bubble=ResultBubble(store.config);self.preview=Preview(self.window);self.result_context=None
+        self.delivery=None
         self.result_bubble.edit_requested.connect(self.edit_result)
         self.bridge=Bridge();self.bridge.message.connect(self.receive)
         self.bridge.usage_received.connect(self.record_usage)
@@ -88,7 +90,7 @@ class Controller(QObject):
     def sync_controls(self):
         phase=self.session.phase if self.session else None
         mode=self.session.mode if self.session else None
-        self.bubble.set_session_kind('Ask Anything' if self.session and self.session.assistant else '')
+        self.bubble.set_session_kind('Ask Anything' if self.session and self.session.assistant else 'Translation' if mode=='翻译' else '')
         self.window.set_session_state(phase,mode)
         self.preview.set_session_state(phase,mode)
     @staticmethod
@@ -262,11 +264,13 @@ class Controller(QObject):
             self.window.home_status.setText('Finish the speech recognition check before recording.')
             self.bubble.state('待机','Speech check running…',self.store.config['demo']);return
         guard=self.keys.input_guard
+        self.clear_delivery()
         t=windows.target();t=None if windows.own_target(t) else t
         self.result_bubble.hide()
         assistant=mode=='随便问'
         context=windows.text_context(t) if assistant else None
         s=Session(mode,copy.deepcopy(self.store.config),t,instruction=mode=='指令',assistant=assistant,context=context,input_epoch=self.input_epoch);self.session=s
+        s.cfg['_data_dir']=str(self.store.root)
         s.hook_epoch,s.hook_cancel_epoch=guard
         self.configure_progress(s)
         if assistant:s.focus_changed=guard!=self.keys.input_guard
@@ -395,6 +399,9 @@ class Controller(QObject):
                 self.result_bubble.show_error(str(payload)+history_warning,raw,demo=s.cfg['demo'],status='Processing failed',source=self.bubble)
             self.bubble.state('失败',('Original text preserved' if raw.strip() else 'No transcript captured')+history_warning,s.cfg['demo']);return
         dictation=s.mode in ('听写','翻译')
+        if dictation and s.cfg.get('smart_delivery',True):
+            self.finish_smart_dictation(s,raw,final,history_saved)
+            return
         copied=False
         if dictation and not s.cfg['demo'] and final.strip():
             try:
@@ -420,6 +427,63 @@ class Controller(QObject):
             self.result_bubble.show_result(str(final),demo=s.cfg['demo'],status=('Copied' if copied else 'Result ready · Copy to use')+history_warning,source=self.bubble)
         else:self.preview.show_text(raw,final,notice,replacement,**editor_flags)
         self.bubble.state('完成','Result ready'+history_warning,s.cfg['demo'])
+
+    def finish_smart_dictation(self,s,raw,final,history_saved):
+        self.clear_delivery()
+        warning='' if history_saved else ' · History could not be saved'
+        self.result_context=(raw,str(final))
+        review=getattr(final,'review',None)
+        needs_review=(review.needs_review or not review.assessed) if isinstance(review,ReviewAssessment) else bool(s.mode=='翻译' or s.cfg['polish'])
+        if s.cfg['demo']:notice='Demo result · Copy to use'
+        elif not self.keys.monitoring:notice='Input monitoring is unavailable · Copy to use'
+        elif s.focus_changed or not windows.valid(s.target):notice='The target changed or could not be confirmed · Copy to use'
+        elif needs_review:
+            spans=', '.join(review.uncertain_spans) if isinstance(review,ReviewAssessment) else ''
+            notice='Review wording'+(': '+spans if spans else ' · Check before inserting')
+        else:
+            epoch=(s.input_epoch,(s.hook_epoch,s.hook_cancel_epoch))
+            guard=lambda:not self.quitting and self.session is None and epoch==(self.input_epoch,self.keys.input_guard)
+            try:
+                receipt=self.paste(str(final),s.target,guard=guard,verify=True)
+                if not receipt:raise RuntimeError('Input could not be confirmed · Copy to use')
+                self.preview.show_text(raw,str(final),'Checking insertion'+warning,False,show=False,result_edit=True)
+                self.result_bubble.hide()
+                delivery=(s.id,s.target,receipt,raw,str(final),history_saved)
+                self.delivery=delivery
+                QTimer.singleShot(150,lambda:self.confirm_delivery(delivery))
+                self.bubble.state('完成','Checking insertion'+warning,False)
+                return
+            except Exception as exc:notice=str(exc)
+        self.show_copy_result(raw,str(final),notice+warning,s.cfg['demo'])
+
+    def show_copy_result(self,raw,text,notice,demo=False):
+        self.result_context=(raw,text)
+        self.preview.show_text(raw,text,notice,False,show=False,result_edit=True)
+        self.result_bubble.show_result(text,demo=demo,status=notice,source=self.bubble)
+        self.bubble.state('完成','Result ready · Review or copy',demo)
+
+    def confirm_delivery(self,delivery,attempt=0):
+        if self.delivery is not delivery or self.quitting or self.session is not None:return
+        _,target,receipt,raw,text,history_saved=delivery
+        if windows.paste_verified(target,receipt):
+            self.delivery=None
+            if history_saved:
+                self.result_bubble.hide()
+                self.bubble.state('完成','Inserted · saved in History',False)
+            else:self.show_copy_result(raw,text,'Inserted · History could not be saved')
+            return
+        if attempt<2 and windows.valid(target):
+            QTimer.singleShot(200 if attempt==0 else 400,lambda:self.confirm_delivery(delivery,attempt+1))
+            return
+        self.clear_delivery()
+        warning='' if history_saved else ' · History could not be saved'
+        self.show_copy_result(raw,text,'Insertion could not be confirmed · Copy to use'+warning)
+
+    def clear_delivery(self):
+        if self.delivery is not None:
+            _,target,receipt,*_=self.delivery
+            self.delivery=None
+            windows.forget_paste(target,receipt)
     def finish_ask(self,s,payload,error=False):
         if s.recorder:
             if error:s.recorder.abort()
@@ -466,22 +530,35 @@ class Controller(QObject):
         self.bubble.state('失败' if error else '完成',str(payload) if error else notice,s.cfg['demo'])
     def ask_write_guard(self,s):
         return bool(self.session is s and self.keys.monitoring and not s.focus_changed and s.input_epoch==self.input_epoch and not s.cancel.is_set() and self.keys.input_guard==(s.hook_epoch,s.hook_cancel_epoch))
-    def paste(self,text,t,selection=None,context=None,guard=None):
+    def paste(self,text,t,selection=None,context=None,guard=None,verify=False):
         if self.clip_tx:raise RuntimeError('Clipboard operation in progress. Try again shortly.')
         if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
         if not text.strip() or not windows.valid(t):raise RuntimeError('The target changed. Your result is preserved.')
         if selection and not windows.selection_matches(t,selection):raise RuntimeError('The original selection changed. Copy the result instead.')
         if context and not windows.context_matches(t,context):raise RuntimeError('The original selection or cursor changed. Copy the result instead.')
+        receipt=windows.prepare_paste(t,text) if verify else None
+        if verify and not receipt:raise RuntimeError('This input cannot confirm insertion · Copy to use')
+        if verify:
+            try:
+                if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
+                if not windows.paste_ready(t,receipt):raise RuntimeError('The cursor or input changed · Copy to use')
+                if windows.insert_native_edit(t,text,guard=guard,receipt=receipt):return receipt
+            except Exception:
+                windows.forget_paste(t,receipt);raise
         tx=windows.ClipboardTransaction();tx.write(text)
         try:
             if not windows.valid(t):raise RuntimeError('The target changed.')
             if selection and not windows.selection_matches(t,selection):raise RuntimeError('The original selection changed. Copy the result instead.')
             if context and not windows.context_matches(t,context):raise RuntimeError('The original selection or cursor changed. Copy the result instead.')
             if guard and not guard():raise RuntimeError('Input changed. Copy the result instead.')
+            if verify and not windows.paste_ready(t,receipt):raise RuntimeError('The cursor or input changed · Copy to use')
             windows.chord('V')
-        except Exception:self.restore_clipboard(tx);raise
+        except Exception:
+            if receipt:windows.forget_paste(t,receipt)
+            self.restore_clipboard(tx);raise
         self.clip_tx=tx
         QTimer.singleShot(650,lambda:self.restore_clipboard(tx))
+        return receipt
     def restore_clipboard(self,tx,expected=None,attempt=0):
         try:tx.restore(expected)
         except windows.ClipboardBusy:
@@ -503,6 +580,7 @@ class Controller(QObject):
         if self.session:self.session.focus_changed=True
 
     def cancel(self):
+        self.clear_delivery()
         self.pending=False;self.pending_generation+=1;self.capture_generation+=1;self.capture_busy=False
         self.result_bubble.hide()
         if self.capture_tx:self.restore_clipboard(self.capture_tx);self.capture_tx=None
@@ -579,6 +657,7 @@ class Controller(QObject):
         if self.session or not raw.strip():self.preview.notice.setText('Enter text and wait for the current operation to finish.');return
         if mode=='自定义' and not instruction.strip():self.preview.notice.setText('Enter an editing instruction.');return
         s=Session(mode,copy.deepcopy(self.store.config),None,raw=raw,phase='整理',stopped=time.monotonic(),editor_context=self.preview.editor_context);self.session=s;self.sync_controls();self.bubble.state('整理','Preparing preview',s.cfg['demo'])
+        s.cfg['_data_dir']=str(self.store.root)
         self.configure_progress(s,voice=False);self.update_progress(s)
         def work():
             try:self.bridge.message.emit(s.id,'result',transform(raw,mode,s.cfg,instruction,s.cancel,usage_sink=self.bridge.usage_received.emit))
@@ -630,6 +709,7 @@ class Controller(QObject):
             self.bubble.state('待机','Changes saved',values['demo']);self.window.settings_status.setText('Changes saved')
         except Exception as e:QMessageBox.warning(self.window,'Could not save settings',str(e))
     def quit(self):
+        self.clear_delivery()
         self.quitting=True;self.model_cancel.set()
         for _,cancel,_ in self.service_tests.values():cancel.set()
         self.service_tests.clear();self.cancel();self.keys.stop()

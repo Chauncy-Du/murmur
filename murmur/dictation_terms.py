@@ -59,7 +59,13 @@ def _terms(source):
         identifier=key not in _PROSE_ABBREVIATIONS and (any(c.isdigit() for c in word) or any(c in '_.:+#' for c in word)
                     or bool(re.search(r'[a-z][A-Z]',word))
                     or sum(c.isupper() for c in word)>=2 and word not in _ROUTINE_UPPER)
-        if key in _CORE or identifier or key in _SHORT_TECH and run_sizes[index]<=3:
+        # A standalone title-cased name followed by Chinese 的 is a named
+        # modifier, including unfamiliar names. Do not freeze English sentences
+        # merely because their first word is capitalized.
+        named_modifier = (run_sizes[index] == 1 and len(word) >= 3
+                          and word[0].isupper() and word[1:].islower()
+                          and bool(re.match(r'\s*的', source[match.end():])))
+        if key in _CORE or identifier or named_modifier or key in _SHORT_TECH and run_sizes[index]<=3:
             terms.append(_Term(word,key,match.start(),match.end()))
     return sorted(terms,key=lambda term:term.start)
 

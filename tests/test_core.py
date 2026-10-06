@@ -46,6 +46,7 @@ def test_history_search_export_delete(tmp_path):
 
 def test_retention_and_audio(tmp_path):
     s=Store(tmp_path);audio=tmp_path/'audio'/'one.wav';audio.parent.mkdir();audio.write_bytes(b'pcm')
+    s.config['retention']=90
     s.add('old','听写','原文','结果',1,1,False,audio=str(audio));s.db.execute('UPDATE history SET time=?',((datetime.now()-timedelta(days=100)).isoformat(),));s.db.commit();s.prune();assert not s.rows();assert not audio.exists()
 
 def test_language():

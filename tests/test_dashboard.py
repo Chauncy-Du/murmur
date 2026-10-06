@@ -8,7 +8,7 @@ def test_four_pages_and_compact_sizes(tmp_path):
     app=QApplication.instance() or QApplication([]);window=MainWindow(Store(tmp_path))
     assert window.stack.count()==4;assert window.width()==920;assert window.settings_tabs.count()==5
     assert 'hotwords' not in window.fields
-    assert window.fields['bubble_width'].value()==168
+    assert window.fields['bubble_width'].value()==224
     for index in range(4):window.navigate(index);app.processEvents()
     window.hide()
 

@@ -496,6 +496,8 @@ class MainWindow(SettingsForm):
         self._session_phase = normalized
         self._session_mode = mode
         idle = normalized == 'idle'
+        if hasattr(self,'bubble_preview_button'):self.bubble_preview_button.setEnabled(idle)
+        if not idle and getattr(self,'_appearance_preview',None):self._appearance_preview.stop()
         checking_asr = bool(self.service_test_busy['asr'])
         can_start = idle and not checking_asr
         self.escape_shortcut.setEnabled(not idle)
@@ -550,6 +552,11 @@ class MainWindow(SettingsForm):
             self._service_settings.refresh()
         for kind, controls in self.service_test_controls.items():
             enabled = self._session_phase == 'idle' and not self.service_test_busy[kind] and not (kind == 'asr' and self._offline_download_busy)
+            if kind in ('llm','ask') and 'llm_model' in self.fields and 'ask_llm_model' in self.fields:
+                picker=self.fields['llm_model' if kind=='llm' else 'ask_llm_model']
+                picker.refresh_button.setEnabled(enabled)
+                picker.refresh_button.setText('Refreshing…' if self.service_test_busy[kind] else 'Refresh models')
+                picker.combo.setEnabled(enabled)
             for test, _, _ in controls:
                 test.setEnabled(enabled)
                 if self._session_phase != 'idle':
@@ -1147,6 +1154,22 @@ class MainWindow(SettingsForm):
         self.set_service_test_state(kind, True)
         self.service_test.emit(kind, config, secrets)
 
+    def request_model_refresh(self, kind):
+        if kind not in ('llm','ask') or self._session_phase!='idle' or self.service_test_busy[kind]:
+            self.settings_status.setText('Finish the current session or connection check before refreshing models.')
+            return
+        config,secrets=self.service_test_values()
+        config['_model_discovery']=True
+        self.set_service_test_state(kind,True)
+        self.service_test.emit(kind,config,secrets)
+
+    def refresh_models_after_key(self,kind):
+        from .projecthub import is_projecthub
+        prefix='llm' if kind=='llm' else 'ask_llm'
+        key_field=self.llm_key if kind=='llm' else self.ask_llm_key
+        if key_field.text().strip() and is_projecthub(self.fields[prefix+'_url'].text()):
+            self.request_model_refresh(kind)
+
     def set_service_test_state(self, kind, busy, summary='', detail='', success=None):
         if kind not in self.service_test_controls:
             return
@@ -1472,6 +1495,9 @@ class MainWindow(SettingsForm):
 
     def set_service_model_metadata(self, kind, result):
         self.service_model_metadata.pop(kind, None)
+        if result.get('success') and isinstance(result.get('models'),list) and kind in ('llm','ask'):
+            prefix='llm' if kind=='llm' else 'ask_llm'
+            self.fields[prefix+'_model'].setModels(result['models'])
         if result.get('success') and isinstance(result.get('model'), str):
             self.service_model_metadata[kind] = {key: result.get(key) for key in
                 ('model', 'model_selection', 'response_model', 'parameter_size', 'parameter_size_source')}
@@ -1546,6 +1572,8 @@ class MainWindow(SettingsForm):
         auto=bool(self.fields['ollama_auto'].currentData())
         self._llm_profiles[local] = (url, model,auto)
         preset = 'custom'
+        from .projecthub import is_projecthub
+        if not local and is_projecthub(url):preset='projecthub'
         if not local and url.rstrip('/') == 'https://api.deepseek.com/v1' and model == 'deepseek-flash':
             preset = 'deepseek'
         elif not local and auto and url.rstrip('/') == 'http://127.0.0.1:11434/v1':
@@ -1603,14 +1631,15 @@ class MainWindow(SettingsForm):
         value = self.llm_preset.currentData()
         if value == 'custom' or 'llm_url' not in self.fields:
             return
-        local = value not in ('deepseek','local_auto')
+        local = value not in ('deepseek','local_auto','projecthub')
         syncing = self._llm_source_syncing
         self._llm_source_syncing = True
         try:
             self.fields['ollama'].setCurrentIndex(self.fields['ollama'].findData(local))
             self.fields['ollama_auto'].setCurrentIndex(self.fields['ollama_auto'].findData(value in ('auto','local_auto')))
-            self.fields['llm_url'].setText('https://api.deepseek.com/v1' if value=='deepseek' else 'http://127.0.0.1:11434/v1')
-            if value not in ('auto','local_auto'):self.fields['llm_model'].setText(f'qwen3.5:{value}' if local else 'deepseek-flash')
+            from .projecthub import BASE_URL, DEFAULT_MODEL
+            self.fields['llm_url'].setText(BASE_URL if value=='projecthub' else 'https://api.deepseek.com/v1' if value=='deepseek' else 'http://127.0.0.1:11434/v1')
+            if value not in ('auto','local_auto'):self.fields['llm_model'].setText(DEFAULT_MODEL if value=='projecthub' else f'qwen3.5:{value}' if local else 'deepseek-flash')
         finally:
             self._llm_source_syncing = syncing
         self.update_llm_selection()

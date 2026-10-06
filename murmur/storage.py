@@ -23,7 +23,12 @@ PREVIOUS_TRANSLATION_PROMPT = 'Translate into {language}. Return only the transl
 DEFAULTS = dict(demo=False, polish=True, asr_model='fun-asr-realtime', asr_url='wss://dashscope.aliyuncs.com/api-ws/v1/inference', vocabulary_id='', llm_url='https://dashscope.aliyuncs.com/compatible-mode/v1', llm_model='qwen-plus', ollama=False, microphone='', trigger='hold', dictation_key='right_alt', translation_key='alt+shift', selection_key='alt+space', bubble_position='bottom', bubble_screen=0, bubble_offset=48, retention=90, save_audio=False, startup=False, hotwords='MurMur\n百炼\nPySide6', rules='', style='自然、简洁', language='英语', prompts={'听写':DICTATION_PROMPT, '润色':'润色文本，保留原意，只输出结果。', '翻译':'翻译为{language}，只输出译文。', '总结':'总结文本，只输出摘要。', '扩写':'扩写文本，不编造事实。', '自定义':'按用户指令编辑文本，只输出结果。'})
 LEGACY_PROMPTS=copy.deepcopy(DEFAULTS['prompts'])
 LEGACY_PROMPTS['听写']=LEGACY_DICTATION_PROMPT
-DEFAULTS.update(style='Natural and concise',language='English',bubble_width=168)
+DEFAULTS.update(style='Natural and concise',language='English',bubble_width=224,bubble_height=44,
+                bubble_result_width=400,bubble_follow_mouse=False,bubble_cursor_offset=24,
+                bubble_enter_motion='pop',bubble_exit_motion='pop',bubble_state_motion=True,
+                bubble_wave_motion=True,bubble_motion_duration=240)
+DEFAULTS['smart_delivery']=True
+DEFAULTS.update(bubble_offset=20,retention=0,save_audio=True,bubble_wave_style='bars')
 DEFAULTS['trigger']='toggle'
 ONLINE_LLM_DEFAULTS=('https://dashscope.aliyuncs.com/compatible-mode/v1','qwen-plus')
 DEFAULTS.update(ollama=False,ollama_auto=True,llm_url='http://127.0.0.1:11434/v1',llm_model='qwen3.5:2b')
@@ -81,14 +86,18 @@ def validated_config(saved):
     explicit=saved.get('llm_model')
     local_explicit=is_local_endpoint(saved.get('llm_url','')) and isinstance(explicit,str) and bool(explicit.strip())
     if 'ollama_auto' not in saved and (saved.get('ollama') is True or local_explicit):config['ollama_auto']=False
-    config['bubble_width']=168
     choices={'trigger':{'hold','toggle'},'dictation_key':{'right_alt','f8','f9','disabled'},
              'translation_key':{'alt+shift','ctrl+shift+f9','disabled'},
-             'selection_key':{'alt+space','ctrl+shift+space','disabled'},'bubble_position':{'top','bottom'},
+             'selection_key':{'alt+space','ctrl+shift+space','disabled'},
+             'bubble_position':{'top','bottom','left','right','top-left','top-right','bottom-left','bottom-right'},
+             'bubble_enter_motion':{'pop','slide','fade','none'},'bubble_exit_motion':{'pop','slide','fade','none'},
+             'bubble_wave_style':{'bars','centered','dots','line','timeline'},
              'ask_key':{'right_alt+space','ctrl+shift+a','disabled'},
              'asr_backend':{'bailian','offline','ali_nls','openai','groq','http_asr'},'offline_engine':set(OFFLINE_MODEL_DIR_NAMES),
              'offline_language':{'auto','zh','en','yue','ja','ko'},'offline_acceleration':{'cpu','gpu'}}
-    limits={'retention':(0,3650),'bubble_screen':(0,32),'bubble_offset':(0,3650),'bubble_width':(156,180),'offline_threads':(1,8),
+    limits={'retention':(0,3650),'bubble_screen':(0,32),'bubble_offset':(0,3650),'bubble_width':(200,360),
+            'bubble_height':(40,64),'bubble_result_width':(320,640),'bubble_cursor_offset':(12,160),
+            'bubble_motion_duration':(120,500),'offline_threads':(1,8),
             'asr_http_timeout':(5,180),'audio_lead_padding_ms':(0,2000),'audio_tail_padding_ms':(0,1000)}
     for key,value in saved.items():
         if key not in config:continue

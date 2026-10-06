@@ -243,9 +243,17 @@ class ServiceSettings:
             if local and not profile_deepseek or not local and not standard_deepseek:
                 text_choices.append(('Online · ' + ('Auto' if auto else model or 'Unspecified') if not local else 'Online · ' + online[1], 'online', model if not local else online[1]))
             text_choices.append(('DeepSeek · Flash', 'deepseek', 'deepseek'))
+            from .projecthub import is_projecthub
+            text_choices.append(('ProjectHub · Private API', 'projecthub', model if is_projecthub(w.fields['llm_url'].text()) else 'model'))
             current = 'local_auto' if local and auto else model.split(':')[-1] if local and model in ('qwen3.5:2b', 'qwen3.5:4b', 'qwen3.5:9b') else 'local_custom' if local else 'online'
             if standard_deepseek:
                 current = 'deepseek'
+            from .projecthub import is_projecthub
+            if not local and is_projecthub(w.fields['llm_url'].text()):current='projecthub'
+            if not local and is_projecthub(w.fields['llm_url'].text()):
+                for item in w.fields['llm_model'].models:
+                    text_choices.append((item['name'],'catalog:'+item['id'],item['id']))
+                    if item['id']==model:current='catalog:'+model
             if local and not auto and current not in [item[1] for item in text_choices]:
                 text_choices.insert(4, ('Local · ' + (model or 'Unspecified'), current, model))
             if not local:
@@ -258,6 +266,7 @@ class ServiceSettings:
                 w.services_model_choices['llm'].setToolTip(w.services_model_choices['llm'].currentText()+'\n'+AUTO_POLICY_HELP+('\nLast successful check resolved '+resolved+'.' if resolved else '\nTest to identify the selected model.'))
             ask_model = w.fields['ask_llm_model'].text().strip()
             ask_items = [(ask_model or 'Model not specified', 'custom', ask_model), ('DeepSeek · Flash', 'deepseek', 'deepseek')]
+            ask_items.append(('ProjectHub · Private API', 'projecthub', ask_model if is_projecthub(w.fields['ask_llm_url'].text()) else 'model'))
             ask_endpoint = w.fields['ask_llm_url'].text().strip().rstrip('/')
             ask_url = ask_endpoint.lower()
             if 'dashscope.aliyuncs.com' in ask_url:
@@ -265,6 +274,11 @@ class ServiceSettings:
             elif 'deepseek.com' in ask_url:
                 ask_items += [('DeepSeek · V4 Pro', 'deepseek_pro', 'deepseek')]
             ask_current = 'custom'
+            if is_projecthub(ask_endpoint):ask_current='projecthub'
+            if is_projecthub(ask_endpoint):
+                for item in w.fields['ask_llm_model'].models:
+                    ask_items.append((item['name'],'catalog:'+item['id'],item['id']))
+                    if item['id']==ask_model:ask_current='catalog:'+ask_model
             if ask_endpoint == 'https://api.deepseek.com/v1' and ask_model in ('deepseek-flash', 'deepseek-v4-pro'):
                 ask_current = 'deepseek' if ask_model == 'deepseek-flash' else 'deepseek_pro'
             elif 'dashscope.aliyuncs.com' in ask_url and ask_model in ('qwen-plus', 'qwen-turbo'):
@@ -291,8 +305,10 @@ class ServiceSettings:
             else:
                 w.fields['asr_backend'].setCurrentIndex(w.fields['asr_backend'].findData(value))
         elif kind == 'llm':
-            if value == 'deepseek':
-                w.llm_preset.setCurrentIndex(w.llm_preset.findData('deepseek'))
+            if value.startswith('catalog:'):
+                w.fields['llm_model'].setText(value.removeprefix('catalog:'))
+            elif value in ('deepseek','projecthub'):
+                w.llm_preset.setCurrentIndex(w.llm_preset.findData(value))
             elif value == 'deepseek_pro':
                 w.llm_source.setCurrentIndex(w.llm_source.findData(False))
                 w.fields['llm_url'].setText('https://api.deepseek.com/v1')
@@ -305,7 +321,13 @@ class ServiceSettings:
                     if value != 'local_auto':
                         w.fields['llm_model'].setText('qwen3.5:' + value)
         elif kind == 'ask':
-            if value in ('deepseek', 'deepseek_pro'):
+            if value.startswith('catalog:'):
+                w.fields['ask_llm_model'].setText(value.removeprefix('catalog:'))
+            elif value == 'projecthub':
+                from .projecthub import BASE_URL, DEFAULT_MODEL
+                w.fields['ask_llm_url'].setText(BASE_URL)
+                w.fields['ask_llm_model'].setText(DEFAULT_MODEL)
+            elif value in ('deepseek', 'deepseek_pro'):
                 w.fields['ask_llm_url'].setText('https://api.deepseek.com/v1')
                 w.fields['ask_llm_model'].setText('deepseek-flash' if value == 'deepseek' else 'deepseek-v4-pro')
             elif value != 'custom':

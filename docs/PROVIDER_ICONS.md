@@ -28,6 +28,24 @@ configured model can come from another provider.
 
 ## Neutral engine and selection glyphs
 
+### Gemini and Claude additions (2026-10-05)
+
+`gemini.png` is the original 512×512 PNG linked as the favicon by the
+[official Gemini page](https://gemini.google.com), downloaded from
+[Google's static asset host](https://www.gstatic.com/lamda/images/gemini_sparkle_4g_512_lt_f94943af3be039176192d.png).
+`claude.png` is the original 338×338 PNG from the
+[official Claude app icon endpoint](https://claude.ai/images/claude_app_icon.png).
+Both files are used unchanged as model identity marks, including in the editable
+model picker, service overview and discovered-model menus. These are provider
+trademarks, not MurMur artwork or an assertion of endorsement; no open-source
+license for the favicon artwork is claimed.
+
+SHA256: `gemini.png` = `5e7cfecaa53f4f65a313fe89b0f389548126544a78fad8489510c70ae641a4a1`;
+`claude.png` = `c7b5642f810adfba78781592d9dec18d7eb376c7ebf403c4d882fb9d39f65408`.
+
+Gemini and Claude/Anthropic family identifiers resolve before generic runtime
+names. Unknown models and API protocol labels continue using neutral marks.
+
 No independently licensed, official engine-specific mark was verified for
 SenseVoice, Paraformer or Fun-ASR. Those engines therefore receive distinct
 neutral glyphs authored for MurMur rather than another engine's logo.

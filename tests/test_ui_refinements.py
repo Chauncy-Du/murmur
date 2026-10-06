@@ -185,25 +185,25 @@ def test_switch_and_spin_controls_keep_keyboard_mouse_and_save_semantics(window)
     spin = window.fields['bubble_width']
     assert isinstance(spin, QSpinBox)
     spin.setFocus()
-    spin.setValue(168)
+    spin.setValue(224)
     QTest.keyClick(spin, Qt.Key_Up)
-    assert spin.value() == 169
+    assert spin.value() == 225
     option = QStyleOptionSpinBox()
     spin.initStyleOption(option)
     up = spin.style().subControlRect(QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxUp, spin)
     QTest.mouseClick(spin, Qt.LeftButton, pos=up.center())
-    assert spin.value() == 170
-    spin.setValue(180)
+    assert spin.value() == 226
+    spin.setValue(360)
     QTest.keyClick(spin, Qt.Key_Up)
-    assert spin.value() == 180
-    spin.setValue(156)
+    assert spin.value() == 360
+    spin.setValue(200)
     QTest.keyClick(spin, Qt.Key_Down)
-    assert spin.value() == 156
+    assert spin.value() == 200
     saved = []
     window.save_settings.connect(lambda config, secrets: saved.append(config))
     window.save()
     assert saved[0]['demo'] is initial
-    assert saved[0]['bubble_width'] == 156
+    assert saved[0]['bubble_width'] == 200
 
 
 def test_default_home_has_no_needless_scroll_at_supported_widths(window):

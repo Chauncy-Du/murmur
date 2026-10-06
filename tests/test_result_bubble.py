@@ -14,7 +14,7 @@ from murmur.ui import Bubble, Preview, ResultBubble, STYLE
 @pytest.fixture
 def result_bubble():
     app = QApplication.instance() or QApplication([])
-    bubble = ResultBubble({})
+    bubble = ResultBubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     yield bubble
     bubble.hide()
 
@@ -23,13 +23,14 @@ def test_long_result_is_bounded_but_copy_and_edit_preserve_full_text(result_bubb
     copied, edited = [], []
     class Clipboard:
         def setText(self, text): copied.append(text)
+        def text(self): return copied[-1] if copied else ''
     monkeypatch.setattr(QApplication, 'clipboard', lambda: Clipboard())
     text = '<b>Literal result</b>\n' + 'A longer result stays available. ' * 200
     result_bubble.edit_requested.connect(edited.append)
     result_bubble.show_result(text, demo=True)
     QApplication.processEvents()
     assert result_bubble.isVisible()
-    assert result_bubble.width() == 360 and result_bubble.height() <= 180
+    assert result_bubble.width() == 400 and result_bubble.height() <= 280
     assert result_bubble.preview.isReadOnly()
     assert result_bubble.preview.focusPolicy() == Qt.NoFocus
     assert result_bubble.preview.toPlainText() == text
@@ -136,7 +137,7 @@ def test_usage_uses_only_tracked_totals_and_optional_prices(tmp_path, monkeypatc
 
 
 def test_result_expands_from_capsule_to_same_anchor_and_cleans_effect(result_bubble, monkeypatch):
-    source = Bubble({})
+    source = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     source.position()
     source.state('识别')
     start = QRect(source.geometry())
@@ -184,7 +185,7 @@ def test_cancelled_result_animation_never_resurrects(result_bubble, dismiss):
 
 
 def test_rapid_new_recording_and_result_invalidate_previous_animation(result_bubble):
-    source = Bubble({})
+    source = Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'none'})
     source.position()
     source.state('识别')
     result_bubble.show_result('An old result', source=source)
