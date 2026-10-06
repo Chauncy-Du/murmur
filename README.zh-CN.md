@@ -4,7 +4,7 @@
 
 **轻巧的 Windows 语音助手，让听写、翻译与文字编辑融入日常工作。**
 
-[![Version](https://img.shields.io/badge/version-0.4.6-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.7-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#快速开始)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@
 
 全新配置默认使用本机 SenseVoice 语音识别，并关闭 Demo。也可选择 Paraformer、Fun-ASR-Nano、Qwen3-ASR 或云端服务；文字处理可使用本机 Ollama 或 DeepSeek 等 OpenAI 兼容接口。通过预览与目标检查，决定哪些内容进入你的文档。
 
-> **项目状态：**当前 v0.4.6 为 Beta 迭代，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
+> **项目状态：**当前 v0.4.7 为 Beta 迭代，安装包分发仍受安全阻挡。此前便携构建被开发环境的组织安全系统阻挡，当前没有可分发的便携 EXE 或二进制 ZIP 包。详见[验证记录](docs/VALIDATION.md)和[构建通知](docs/PORTABLE_SECURITY_BLOCK.txt)。构建脚本保留阻挡检查，等待审核处理。
 
 ## 功能
 
@@ -292,4 +292,4 @@ MurMur 源码采用 [MIT 许可证](LICENSE)。依赖及模型权重各自遵循
 
 此前迭代的设备关闭屏障、取消原文恢复、口误整理和公开模型质量限制见 [0.4.4 验证记录](docs/RELEASE_0.4.4.md)。
 
-当前 Beta：[0.4.6 改动与验证](docs/RELEASE_0.4.6.md)。
+当前 Beta：[0.4.7 改动与验证](docs/RELEASE_0.4.7.md)。

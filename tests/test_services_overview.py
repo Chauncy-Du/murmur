@@ -42,6 +42,43 @@ def window(tmp_path, monkeypatch):
     store.db.close()
 
 
+@pytest.mark.parametrize('kind',['llm','ask'])
+def test_same_deepseek_model_distinguishes_private_catalog_from_official_endpoint(window,kind):
+    from murmur.projecthub import BASE_URL
+    before=deepcopy(window.store.config)
+    if kind=='llm':
+        window.llm_source.setCurrentIndex(window.llm_source.findData(False))
+        window.fields['ollama_auto'].setCurrentIndex(window.fields['ollama_auto'].findData(False))
+    url=window.fields['llm_url' if kind=='llm' else 'ask_llm_url']
+    picker=window.fields['llm_model' if kind=='llm' else 'ask_llm_model']
+    url.setText(BASE_URL+'/v1')
+    picker.setModels([{'id':'deepseek-flash','name':'DeepSeek'}])
+    picker.setText('deepseek-flash')
+    window.sync_service_selectors()
+    window.update_services_overview()
+    combo=window.services_model_choices[kind]
+    assert combo.currentData()=='catalog:deepseek-flash'
+    assert combo.currentText()=='Private · DeepSeek'
+    assert 'ProjectHub Private' in combo.toolTip()
+    assert window.service_overview_models[kind].text().startswith('ProjectHub Private · deepseek-flash')
+    assert 'ProjectHub Private' in window.service_overview_models[kind].toolTip()
+    assert url.text()==BASE_URL+'/v1' and picker.text()=='deepseek-flash'
+    capture=os.environ.get('MURMUR_SERVICE_IDENTITY_SCREENSHOT')
+    if capture and kind=='llm':
+        from pathlib import Path
+        target=Path(capture);target.mkdir(parents=True,exist_ok=True)
+        QTest.qWait(80);window.grab().save(str(target/'private.png'))
+    url.setText('https://api.deepseek.com/v1')
+    window.sync_service_selectors()
+    window.update_services_overview()
+    assert combo.currentText()=='DeepSeek Official · Flash'
+    assert window.service_overview_models[kind].text().startswith('DeepSeek Official · deepseek-flash')
+    assert picker.text()=='deepseek-flash'
+    assert window.store.config==before and not window.store.path.exists()
+    if capture and kind=='llm':
+        QTest.qWait(80);window.grab().save(str(target/'official.png'))
+
+
 def mark_completed(window, kind='llm', model='qwen3.5:4b'):
     window.set_service_model_metadata(kind, {
         'success': True, 'model': model, 'model_selection': 'auto',
@@ -322,7 +359,8 @@ def test_subpage_navigation_keeps_credentials_paths_and_independent_drafts(windo
     assert cfg['ask_llm_model'] == 'synthetic-custom-ask'
     assert cfg['llm_model'] == 'synthetic-polish'
     assert secrets['asr'] == 'synthetic-key' and secrets['ask_llm'] == 'synthetic-ask'
-    assert window.services_model_choices['ask'].currentText() == 'synthetic-custom-ask'
+    assert window.services_model_choices['ask'].currentText().endswith(' · synthetic-custom-ask')
+    assert window.services_model_choices['ask'].currentData() == 'custom'
 
 
 def test_overview_rows_stay_bounded_with_long_models_results_and_busy_locks(window):
@@ -330,7 +368,7 @@ def test_overview_rows_stay_bounded_with_long_models_results_and_busy_locks(wind
     summary = 'Synthetic failure summary with full diagnostics. ' * 15
     window.set_service_test_state('ask', False, summary, 'Artificial diagnostic detail', False)
     QApplication.processEvents()
-    assert window.width() == 920 and window.height() == 680
+    assert window.width() == 940 and window.height() == 600
     for kind, card in window.services_cards.items():
         assert card.height() < 160
         assert card.mapTo(window, card.rect().bottomRight()).y() < window.save_button.mapTo(window, QPoint()).y()

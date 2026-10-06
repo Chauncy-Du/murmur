@@ -4,6 +4,7 @@ from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from .ui import CompactComboBox, button, label, line_icon
 from .provider_icons import provider_icon
+from .service_identity import model_source_label
 
 AUTO_POLICY_DESCRIPTION='Prefers installed 4–8B models; otherwise uses other available local models.'
 AUTO_POLICY_HELP=('Auto prefers the smallest known installed text model in the 4–8B range. '
@@ -18,7 +19,7 @@ class ModelLabel(QLabel):
         self.setMinimumWidth(0)
         self.setTextFormat(Qt.PlainText)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.setStyleSheet('font-size:11px;color:#c7b8fa;')
+        self.setStyleSheet('font-size:12px;color:#c7b8fa;')
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -37,7 +38,7 @@ class ServiceStatusLabel(QLabel):
         self.setTextFormat(Qt.PlainText)
         self.setWordWrap(True)
         self.setObjectName('muted')
-        self.setStyleSheet('font-size:11px;')
+        self.setStyleSheet('font-size:12px;')
 
     def setText(self,text):
         changed=text!=self.text()
@@ -63,7 +64,7 @@ class ServiceSettings:
         landing.setContentsMargins(0, 4, 0, 0)
         landing.setSpacing(12)
         explanation = label('Choose a model for each step. Advanced settings are saved with the rest of Settings.', 'muted')
-        explanation.setStyleSheet('font-size:11px;')
+        explanation.setStyleSheet('font-size:12px;')
         landing.addWidget(explanation)
         window.service_overview_models = {}
         window.service_overview_status = {}
@@ -79,25 +80,25 @@ class ServiceSettings:
             card.setStyleSheet('QFrame#serviceModule{background:#252429;border:1px solid #38343f;border-radius:11px;}')
             card.setMinimumWidth(0)
             body = QVBoxLayout(card)
-            body.setContentsMargins(14, 12, 14, 12)
-            body.setSpacing(7)
+            body.setContentsMargins(12, 8, 12, 8)
+            body.setSpacing(4)
             top = QHBoxLayout()
             top.setSpacing(8)
             mark = QLabel()
             mark.setFixedSize(20, 20)
             top.addWidget(mark)
             heading = label(title)
-            heading.setStyleSheet('font-size:13px;font-weight:600;')
+            heading.setStyleSheet('font-size:12px;font-weight:600;')
             top.addWidget(heading, 1)
             choices = CompactComboBox()
-            choices.setFixedWidth(240)
+            choices.setMinimumWidth(160);choices.setMaximumWidth(240);choices.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
             choices.setAccessibleName(title + ' model')
             choices.setToolTip('Choose the configured model. Save changes to apply.')
             choices.currentIndexChanged.connect(lambda index, service=kind: self.choose(service))
-            top.addWidget(choices)
+            top.addWidget(choices,1)
             body.addLayout(top)
             role = label(description, 'muted')
-            role.setStyleSheet('font-size:11px;')
+            role.setStyleSheet('font-size:12px;')
             body.addWidget(role)
             model = ModelLabel()
             body.addWidget(model)
@@ -107,7 +108,7 @@ class ServiceSettings:
             status.setText('Test: Not checked')
             bottom.addWidget(status, 1)
             progress = label('', 'muted')
-            progress.setStyleSheet('font-size:11px;')
+            progress.setStyleSheet('font-size:12px;')
             progress.hide()
             bottom.addWidget(progress)
             if kind=='asr':
@@ -166,7 +167,7 @@ class ServiceSettings:
             content.setObjectName('page')
             contents = QVBoxLayout(content)
             contents.setContentsMargins(0, 4, 10, 16)
-            contents.setSpacing(20)
+            contents.setSpacing(12)
             scroll.setWidget(content)
             column.addWidget(scroll, 1)
             window.services_subpages[kind] = scroll
@@ -205,7 +206,11 @@ class ServiceSettings:
                 combo.setCurrentIndex(selected)
             if changed and popup_open and combo.findData(highlighted) >= 0:
                 combo.view().setCurrentIndex(combo.model().index(combo.findData(highlighted), 0))
-        combo.setToolTip(combo.currentText() + ' · Save changes to apply.')
+        origin=''
+        if kind in ('llm','ask'):
+            key='llm_url' if kind=='llm' else 'ask_llm_url'
+            origin=model_source_label(self.window.fields[key].text())+'\n'
+        combo.setToolTip(origin+combo.currentText() + ' · Save changes to apply.')
         self.window.services_provider_marks[kind].setPixmap(provider_icon(items[max(0, combo.currentIndex())][2], 20).pixmap(20, 20))
 
     def refresh(self):
@@ -241,10 +246,11 @@ class ServiceSettings:
             standard_deepseek = w.fields['llm_url'].text().strip().rstrip('/') == 'https://api.deepseek.com/v1' and model == 'deepseek-flash' and not bool(w.fields['ollama_auto'].currentData()) and not bool(w.fields['ollama'].currentData())
             profile_deepseek = online[0].strip().rstrip('/') == 'https://api.deepseek.com/v1' and online[1] == 'deepseek-flash' and (len(online) < 3 or not online[2]) and (len(online) < 4 or not online[3])
             if local and not profile_deepseek or not local and not standard_deepseek:
-                text_choices.append(('Online · ' + ('Auto' if auto else model or 'Unspecified') if not local else 'Online · ' + online[1], 'online', model if not local else online[1]))
-            text_choices.append(('DeepSeek · Flash', 'deepseek', 'deepseek'))
+                origin=model_source_label(w.fields['llm_url'].text() if not local else online[0])
+                text_choices.append((origin+' · '+('Auto' if auto else model or 'Unspecified') if not local else origin+' · '+online[1], 'online', model if not local else online[1]))
+            text_choices.append(('DeepSeek Official · Flash', 'deepseek', 'deepseek'))
             from .projecthub import is_projecthub
-            text_choices.append(('ProjectHub · Private API', 'projecthub', model if is_projecthub(w.fields['llm_url'].text()) else 'model'))
+            text_choices.append(('ProjectHub Private · API', 'projecthub', model if is_projecthub(w.fields['llm_url'].text()) else 'model'))
             current = 'local_auto' if local and auto else model.split(':')[-1] if local and model in ('qwen3.5:2b', 'qwen3.5:4b', 'qwen3.5:9b') else 'local_custom' if local else 'online'
             if standard_deepseek:
                 current = 'deepseek'
@@ -252,32 +258,32 @@ class ServiceSettings:
             if not local and is_projecthub(w.fields['llm_url'].text()):current='projecthub'
             if not local and is_projecthub(w.fields['llm_url'].text()):
                 for item in w.fields['llm_model'].models:
-                    text_choices.append((item['name'],'catalog:'+item['id'],item['id']))
+                    text_choices.append(('Private · '+item['name'],'catalog:'+item['id'],item['id']))
                     if item['id']==model:current='catalog:'+model
             if local and not auto and current not in [item[1] for item in text_choices]:
                 text_choices.insert(4, ('Local · ' + (model or 'Unspecified'), current, model))
             if not local:
                 if 'deepseek.com' in w.fields['llm_url'].text().lower():
-                    text_choices += [('DeepSeek · V4 Pro', 'deepseek_pro', 'deepseek')]
+                    text_choices += [('DeepSeek Official · V4 Pro', 'deepseek_pro', 'deepseek')]
             self.populate('llm', text_choices, current)
             auto_index=w.services_model_choices['llm'].findData('local_auto')
             w.services_model_choices['llm'].setItemData(auto_index,AUTO_POLICY_HELP,Qt.ToolTipRole)
             if current=='local_auto':
                 w.services_model_choices['llm'].setToolTip(w.services_model_choices['llm'].currentText()+'\n'+AUTO_POLICY_HELP+('\nLast successful check resolved '+resolved+'.' if resolved else '\nTest to identify the selected model.'))
             ask_model = w.fields['ask_llm_model'].text().strip()
-            ask_items = [(ask_model or 'Model not specified', 'custom', ask_model), ('DeepSeek · Flash', 'deepseek', 'deepseek')]
-            ask_items.append(('ProjectHub · Private API', 'projecthub', ask_model if is_projecthub(w.fields['ask_llm_url'].text()) else 'model'))
+            ask_items = [(model_source_label(w.fields['ask_llm_url'].text())+' · '+(ask_model or 'Model not specified'), 'custom', ask_model), ('DeepSeek Official · Flash', 'deepseek', 'deepseek')]
+            ask_items.append(('ProjectHub Private · API', 'projecthub', ask_model if is_projecthub(w.fields['ask_llm_url'].text()) else 'model'))
             ask_endpoint = w.fields['ask_llm_url'].text().strip().rstrip('/')
             ask_url = ask_endpoint.lower()
             if 'dashscope.aliyuncs.com' in ask_url:
                 ask_items += [('Qwen · Plus', 'qwen-plus', 'qwen'), ('Qwen · Turbo', 'qwen-turbo', 'qwen')]
             elif 'deepseek.com' in ask_url:
-                ask_items += [('DeepSeek · V4 Pro', 'deepseek_pro', 'deepseek')]
+                ask_items += [('DeepSeek Official · V4 Pro', 'deepseek_pro', 'deepseek')]
             ask_current = 'custom'
             if is_projecthub(ask_endpoint):ask_current='projecthub'
             if is_projecthub(ask_endpoint):
                 for item in w.fields['ask_llm_model'].models:
-                    ask_items.append((item['name'],'catalog:'+item['id'],item['id']))
+                    ask_items.append(('Private · '+item['name'],'catalog:'+item['id'],item['id']))
                     if item['id']==ask_model:ask_current='catalog:'+ask_model
             if ask_endpoint == 'https://api.deepseek.com/v1' and ask_model in ('deepseek-flash', 'deepseek-v4-pro'):
                 ask_current = 'deepseek' if ask_model == 'deepseek-flash' else 'deepseek_pro'

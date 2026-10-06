@@ -503,6 +503,11 @@ class LlamaModel:
 
         model_params = llama_model_default_params()
         model_params.n_gpu_layers = n_gpu_layers if use_gpu else 0
+        if use_gpu:
+            # b10621 LLAMA_LOAD_MODE_NONE: upload weights without keeping the
+            # full GGUF mmap resident on Windows as well as the Vulkan copy.
+            # CPU mode retains the native default mapping policy.
+            model_params.load_mode = 0
         if not use_gpu:
             model_params.devices = (ctypes.c_void_p * 1)(None)
 

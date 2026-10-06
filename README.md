@@ -4,7 +4,7 @@
 
 **A compact Windows voice assistant for dictation, translation, and text editing.**
 
-[![Version](https://img.shields.io/badge/version-0.4.6-a7b6ff?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.7-a7b6ff?style=flat-square)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square)](#quick-start)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-65e4cc?style=flat-square)](LICENSE)
@@ -26,7 +26,7 @@ MurMur turns two key presses into a short voice session: press to start, speak, 
 
 New profiles use local SenseVoice speech recognition with Demo mode off. You can also choose Paraformer, Fun-ASR-Nano, Qwen3-ASR or a cloud provider. Keep text processing local with Ollama, or use an OpenAI-compatible endpoint such as DeepSeek. Preview results and keep control over what reaches your documents.
 
-> **Project status:** v0.4.6 is the current Beta iteration; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
+> **Project status:** v0.4.7 is the current Beta iteration; installer distribution remains blocked. There is currently no distributable portable EXE or binary ZIP: a previous portable build was blocked by the development environment's organization security scanner. See the [validation log](docs/VALIDATION.md) and [build notice](docs/PORTABLE_SECURITY_BLOCK.txt). The build script retains that block pending review.
 
 ## Features
 
@@ -290,4 +290,4 @@ Thanks to CapsWriter-Offline for architectural inspiration, and to the SenseVoic
 
 [v0.4.4 local Beta changes](docs/RELEASE_0.4.4.md).
 
-Current Beta: [0.4.6 changes and validation](docs/RELEASE_0.4.6.md).
+Current Beta: [0.4.7 changes and validation](docs/RELEASE_0.4.7.md).

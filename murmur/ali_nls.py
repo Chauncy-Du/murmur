@@ -4,6 +4,7 @@ Official protocol: https://help.aliyun.com/zh/isi/user-guide/websocket
 The project AppKey chooses the recognition language. The temporary NLS token
 is used only for the authenticated connection and never included in errors.
 """
+from .storage import profile_thread
 import json
 import queue
 import threading
@@ -127,7 +128,7 @@ class NlsRecorder:
                 raise _NlsError('Could not connect to Alibaba NLS. Check the endpoint, temporary Token, and service activation.') from None
             self.socket=connection;self._appkey=appkey;self._check()
             connection.settimeout(1)
-            self._reader=threading.Thread(target=self._receive,name='MurMur-NLS-receive',daemon=True)
+            self._reader=profile_thread(target=self._receive,name='MurMur-NLS-receive',daemon=True)
             self._reader.start()
             try:self._command('StartTranscription',{
                 'format':'pcm','sample_rate':SAMPLE_RATE,'enable_intermediate_result':True,
@@ -276,7 +277,7 @@ class NlsRecorder:
                 if worker and worker is not threading.current_thread():worker.join()
             if self._slot_held:self._slot_held=False;_CONNECTION_SLOTS.release()
             self._cleanup_finished.set()
-        threading.Thread(target=cleanup,name='MurMur-NLS-cleanup',daemon=True).start()
+        profile_thread(target=cleanup,name='MurMur-NLS-cleanup',daemon=True).start()
 
     def save_audio(self,path):
         if not self.audio:return ''

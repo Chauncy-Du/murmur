@@ -1,3 +1,4 @@
+from .storage import profile_thread
 import argparse
 import copy
 import os
@@ -8,7 +9,7 @@ import uuid
 from dataclasses import dataclass,field
 from pathlib import Path
 from PySide6.QtCore import QObject,Signal,QTimer,Qt,QEventLoop
-from PySide6.QtWidgets import QApplication,QSystemTrayIcon,QMenu,QMessageBox
+from PySide6.QtWidgets import QApplication,QSystemTrayIcon,QMenu,QMessageBox,QDialog
 from .storage import Store,credential,credential_lock,PRICE_KEYS
 from .hotkeys import Hotkeys
 from .providers import make_recorder as Recorder,transform,ask,AskResult
@@ -18,6 +19,7 @@ from .dashboard import MainWindow
 from .version import __version__
 from . import windows
 from .result_review import ReviewAssessment
+from .console import event,configure,banner
 
 @dataclass
 class Session:
@@ -46,6 +48,7 @@ class Session:
 
 class Bridge(QObject):
     message=Signal(str,str,object)
+    startup_status=Signal(str,str,object)
     model_status=Signal(str,bool)
     service_checked=Signal(str,str,object)
     usage_received=Signal(object)
@@ -60,6 +63,10 @@ class Controller(QObject):
         self.bridge=Bridge();self.bridge.message.connect(self.receive)
         self.bridge.usage_received.connect(self.record_usage)
         self.model_cancel=threading.Event();self.model_busy=False;self.quitting=False;self.service_tests={}
+        self.startup_busy=False;self.startup_error='';self.startup_id='';self.startup_cancel=threading.Event()
+        self.warm_microphone=None
+        self.startup_timer=QTimer(self);self.startup_timer.setInterval(150);self.startup_timer.timeout.connect(self.startup_tick)
+        self.bridge.startup_status.connect(self.startup_status)
         self.bridge.model_status.connect(self.model_status)
         self.bridge.service_checked.connect(self.service_checked)
         self.window.service_test.connect(self.test_service)
@@ -72,14 +79,16 @@ class Controller(QObject):
         if listen:
             try:self.keys.start()
             except Exception:
+                event('hotkeys','Global input monitoring unavailable; results remain in Preview',level='WARNING')
                 try:self.keys.stop()
                 except Exception:pass
                 self.window.key_status.setText('Global input monitoring is unavailable. Results stay in Preview; restart MurMur to retry.')
-        self.tray=QSystemTrayIcon(icon(),self);menu=QMenu();menu.addAction('Open MurMur',self.show_main);menu.addAction('Start / stop dictation',self.toggle);menu.addAction('Cancel',self.cancel);menu.addSeparator();menu.addAction('Quit MurMur',self.quit);self.tray.setContextMenu(menu);self.tray.activated.connect(lambda reason:self.show_main() if reason==QSystemTrayIcon.DoubleClick else None);self.tray.show()
+        self.tray=QSystemTrayIcon(icon(),self);menu=QMenu();menu.addAction('Open MurMur',self.show_main);menu.addAction('Start / stop dictation',self.toggle);menu.addAction('Cancel',self.cancel);menu.addSeparator();menu.addAction('Quit MurMur',lambda checked=False:self.quit());self.tray.setContextMenu(menu);self.tray.activated.connect(lambda reason:self.show_main() if reason==QSystemTrayIcon.DoubleClick else None);self.tray.show()
         self.monitor=QTimer(self);self.monitor.timeout.connect(self.check_focus);self.monitor.start(75)
         self.bubble.position();self.bubble.state('待机',self.shortcut_hint(),store.config['demo'])
         self.sync_controls()
-        try:print(f'[MurMur] Cumulative local LLM tokens: {self.store.usage_totals()["local_tokens"]}',flush=True)
+        event('hotkeys','Global monitoring %s','enabled' if listen and self.keys.monitoring else 'disabled',level='DEBUG')
+        try:event('usage','Cumulative local LLM tokens: %s',self.store.usage_totals()['local_tokens'])
         except (OSError,AttributeError):pass
     def shortcut_hint(self):
         names={'right_alt':'Right Alt','f8':'F8','f9':'F9','disabled':'Capsule'}
@@ -87,7 +96,97 @@ class Controller(QObject):
         ask_key=self.store.config.get('ask_key','right_alt+space')
         if ask_key!='disabled':hint+=' · Ask: '+('Right Alt + Space' if ask_key=='right_alt+space' else 'Ctrl + Shift + A')
         return hint
+    def startup_blocked(self):
+        return self.startup_busy or bool(self.startup_error)
+    def preload_speech(self):
+        """Prepare the selected local recognizer and optional persistent microphone."""
+        if self.quitting or self.startup_busy:return
+        cfg=copy.deepcopy(self.store.config)
+        event('speech','Preparing speech input | backend=%s | engine=%s | acceleration=%s',cfg.get('asr_backend'),cfg.get('offline_engine'),cfg.get('offline_acceleration'))
+        self.window._runtime_asr_ready=False
+        self.window.config_dots['asr'].set_state('pending','Preparing selected speech input…')
+        self.startup_error=''
+        self.result_bubble.hide()
+        old_microphone=self.warm_microphone;self.warm_microphone=None
+        if cfg.get('demo') or (cfg.get('asr_backend')!='offline' and not cfg.get('audio_warm_enabled',True)):
+            if old_microphone:old_microphone.request_close()
+            event('speech','Ready to record | %s','demo mode' if cfg.get('demo') else 'microphone opens on demand')
+            self.window.home_status.clear();return
+        self.startup_busy=True;self.startup_id=uuid.uuid4().hex;ident=self.startup_id
+        self.startup_cancel=threading.Event();cancel=self.startup_cancel
+        self.startup_started=time.monotonic();self.startup_fraction=5
+        self.startup_stage=''
+        self.window.setEnabled(False);self.preview.setEnabled(False);self.result_bubble.hide()
+        self.window.home_status.clear()
+        self.bubble.set_session_kind('');self.bubble.loading_progress(5,'Checking model files')
+        self.startup_timer.start()
+        def work():
+            microphone=None
+            try:
+                if old_microphone:old_microphone.close()
+                if cfg.get('asr_backend')=='offline':
+                    from .offline import model_paths,load_recognizer
+                    model_paths(cfg)
+                    self.bridge.startup_status.emit(ident,'loading',None)
+                    load_recognizer(cfg,cancel)
+                if cfg.get('audio_warm_enabled',True):
+                    from .warm_microphone import WarmMicrophone
+                    self.bridge.startup_status.emit(ident,'microphone',None)
+                    microphone=WarmMicrophone(cfg);microphone.start(cancel)
+                    if cancel.is_set():microphone.close();return
+                    self.warm_microphone=microphone
+                if not cancel.is_set():self.bridge.startup_status.emit(ident,'ready',None)
+            except InterruptedError:
+                if microphone:microphone.close()
+            except Exception as exc:
+                if microphone:microphone.close()
+                if not cancel.is_set():self.bridge.startup_status.emit(ident,'error',str(exc))
+            finally:
+                if cancel.is_set() and microphone:
+                    microphone.close()
+                    if self.warm_microphone is microphone:self.warm_microphone=None
+        profile_thread(target=work,name='MurMur-startup-ASR',daemon=True).start()
+    def startup_tick(self):
+        if not self.startup_busy:return
+        import math
+        elapsed=max(0,time.monotonic()-self.startup_started)
+        self.startup_fraction=max(self.startup_fraction,min(95,int(15+80*(1-math.exp(-elapsed/18)))))
+        detail='Preparing microphone standby' if getattr(self,'startup_stage','')=='microphone' else 'Loading selected speech model · estimated progress'
+        self.bubble.loading_progress(self.startup_fraction,detail)
+    def startup_status(self,ident,stage,payload):
+        if self.quitting or ident!=self.startup_id or not self.startup_busy:return
+        event('startup','Speech initialization stage: %s',stage,level='DEBUG')
+        if stage=='microphone':
+            self.startup_stage=stage;self.startup_fraction=max(90,self.startup_fraction)
+            self.bubble.loading_progress(self.startup_fraction,'Preparing microphone standby');return
+        if stage=='loading':
+            self.startup_fraction=max(15,self.startup_fraction)
+            self.bubble.loading_progress(self.startup_fraction,'Loading selected speech model · estimated progress');return
+        if stage not in ('ready','error'):return
+        self.startup_timer.stop()
+        if stage=='ready':
+            event('speech','Speech input ready | initialization %.2fs',time.monotonic()-self.startup_started)
+            if self.store.config.get('asr_backend')=='offline':self.window.set_speech_readiness(True)
+            self.bubble.loading_progress(100,'Speech model ready')
+            QTimer.singleShot(400,lambda:self.finish_startup(ident))
+        else:
+            event('speech','Speech initialization failed; details are shown in the application',level='ERROR')
+            self.window.set_speech_readiness(False)
+            self.startup_error=str(payload);self.finish_startup(ident)
+            self.window.settings_status.setText('Speech setup failed. Save corrected settings to retry.')
+            self.result_bubble.show_error(self.startup_error,status='Speech input · Setup required',source=self.bubble)
+    def finish_startup(self,ident):
+        if self.quitting or ident!=self.startup_id:return
+        self.startup_busy=False;self.window.setEnabled(True);self.preview.setEnabled(True)
+        self.sync_controls()
+        if self.startup_error:
+            self.window.set_session_state('loading')
+            self.window.home_status.setText('Speech input unavailable · open Settings to fix it')
+        else:self.window.home_status.clear()
+        self.bubble.state('待机',self.shortcut_hint(),self.store.config['demo'])
     def sync_controls(self):
+        if self.startup_blocked():
+            self.window.set_session_state('loading');self.preview.set_session_state('整理',None);return
         phase=self.session.phase if self.session else None
         mode=self.session.mode if self.session else None
         self.bubble.set_session_kind('Ask Anything' if self.session and self.session.assistant else 'Translation' if mode=='翻译' else '')
@@ -109,6 +208,7 @@ class Controller(QObject):
         self.bubble.set_progress(step,s.completed_steps,len(s.steps))
     def show_main(self):self.window.show();self.window.raise_();self.window.activateWindow()
     def record_usage(self,usage):
+        if self.quitting:return
         try:
             recorded=self.store.record_usage(usage);self.window.refresh_token_insights()
             if recorded and usage.get('local') is True:
@@ -116,11 +216,13 @@ class Controller(QObject):
                 counts=lambda name:'unknown' if usage.get(name) is None else str(usage[name])
                 model=json.dumps(str(usage.get('model','')),ensure_ascii=True)
                 total=self.store.usage_totals()['local_tokens']
-                try:print(f'[MurMur] Local LLM {model} | input={counts("input_tokens")} output={counts("output_tokens")} total={counts("total_tokens")} | cumulative local tokens={total}',flush=True)
+                try:event('usage',f'Local LLM {model} | input={counts("input_tokens")} output={counts("output_tokens")} total={counts("total_tokens")} | cumulative local tokens={total}')
                 except (OSError,AttributeError):pass
         except Exception:
+            event('usage','Usage could not be saved',level='WARNING')
             self.window.settings_status.setText('Usage could not be saved. Your text is preserved.')
     def edit_result(self,text):
+        if self.startup_blocked():return
         if self.session:return
         raw=self.result_context[0] if self.result_context else text
         assistant=bool(self.result_context and len(self.result_context)>2)
@@ -137,6 +239,7 @@ class Controller(QObject):
         payload=[{key:cfg.get(key) for key in keys},{name:secrets.get(name,'') for name in names}]
         return hashlib.sha256(json.dumps(payload,sort_keys=True,ensure_ascii=True).encode()).hexdigest()
     def test_service(self,kind,cfg,secrets):
+        if self.startup_busy:return
         if self.quitting or kind not in ('asr','llm','ask') or kind in self.service_tests:return
         if self.session:
             self.window.set_service_test_state(kind,False,'Finish the current recording first.','',False);return
@@ -152,7 +255,7 @@ class Controller(QObject):
             except Exception:
                 result={'success':False,'summary':'Connection check failed.','detail':'Try again. No microphone audio was recorded.'}
             self.bridge.service_checked.emit(kind,ident,result)
-        threading.Thread(target=work,name='MurMur-service-check-'+kind,daemon=True).start()
+        profile_thread(target=work,name='MurMur-service-check-'+kind,daemon=True).start()
     def service_checked(self,kind,ident,result):
         active=self.service_tests.get(kind)
         if self.quitting or not active or active[0]!=ident:return
@@ -161,6 +264,7 @@ class Controller(QObject):
         if self.service_snapshot(kind,cfg,secrets)!=active[2]:
             self.window.set_service_test_state(kind,False,'Settings changed. Test again.','The check used earlier values; this configuration has not been verified.',None);return
         self.window.set_service_model_metadata(kind,result)
+        event('services','%s connection check: %s',kind,'passed' if result['success'] else 'failed',level='INFO' if result['success'] else 'WARNING')
         self.window.set_service_test_state(kind,False,result['summary'],result.get('detail',''),bool(result['success']))
     def model_status(self,text,finished):
         if self.quitting:return
@@ -169,6 +273,7 @@ class Controller(QObject):
             self.window.set_offline_download_state(False)
         self.window.offline_status.setText(text)
     def install_offline(self):
+        if self.startup_busy:return
         if self.model_busy or self.quitting:return
         engine=self.window.fields['offline_engine'].currentData()
         acceleration=self.window.fields['offline_acceleration'].currentData()
@@ -185,7 +290,7 @@ class Controller(QObject):
                 self.bridge.model_status.emit('Model files downloaded and verified. Save changes to use this folder.',True)
             except InterruptedError:self.bridge.model_status.emit('Download cancelled.',True)
             except Exception:self.bridge.model_status.emit('Download failed. Check your connection and try again.',True)
-        threading.Thread(target=work,name='MurMur-model-download',daemon=True).start()
+        profile_thread(target=work,name='MurMur-model-download',daemon=True).start()
     def check_focus(self):
         if self.session and self.session.target and (not self.keys.monitoring or not windows.valid(self.session.target)):self.session.focus_changed=True
         if self.session and self.session.phase=='录音' and self.session.recorder:
@@ -193,6 +298,7 @@ class Controller(QObject):
             self.bubble.state('录音',f'{int(elapsed)//60:02d}:{int(elapsed)%60:02d} · '+('Demo recording' if s.cfg['demo'] else 'Listening'),s.cfg['demo'])
             if s.recorder.error:self.receive(s.id,'error',s.recorder.error)
     def hotkey(self,event,gesture=0):
+        if self.startup_blocked():return
         if event=='pending':
             self.pending=True;self.pending_generation+=1;generation=self.pending_generation
             self.pending_gesture=gesture
@@ -224,6 +330,7 @@ class Controller(QObject):
                 self.toggle()
                 if self.session:self.session.gesture=getattr(self,'pending_gesture',0)
     def start_ask(self,gesture=0):
+        if self.startup_blocked():return
         if self.capture_busy:return
         s=self.session
         if s and s.assistant:
@@ -256,6 +363,7 @@ class Controller(QObject):
             self.cancel()
         self.toggle('随便问')
     def toggle(self,mode='听写'):
+        if self.startup_blocked():return
         if self.capture_busy:return
         if self.session:
             if self.session.phase in ('启动','录音'):self.stop()
@@ -270,7 +378,10 @@ class Controller(QObject):
         assistant=mode=='随便问'
         context=windows.text_context(t) if assistant else None
         s=Session(mode,copy.deepcopy(self.store.config),t,instruction=mode=='指令',assistant=assistant,context=context,input_epoch=self.input_epoch);self.session=s
+        event('session','Starting %s | demo=%s',mode,s.cfg.get('demo',False))
         s.cfg['_data_dir']=str(self.store.root)
+        if self.warm_microphone is not None and not s.cfg.get('demo'):
+            s.cfg['_warm_microphone']=self.warm_microphone
         s.hook_epoch,s.hook_cancel_epoch=guard
         self.configure_progress(s)
         if assistant:s.focus_changed=guard!=self.keys.input_guard
@@ -288,10 +399,11 @@ class Controller(QObject):
             except Exception as e:
                 if s.recorder:s.recorder.abort()
                 self.bridge.message.emit(s.id,'error',str(e))
-        threading.Thread(target=work,daemon=True).start()
+        profile_thread(target=work,daemon=True).start()
     def stop(self):
         s=self.session
         if not s or s.phase not in ('启动','录音'):return
+        event('session','Recording stop requested | phase=%s',s.phase,level='DEBUG')
         if s.phase=='启动':
             s.phase='等待停止'
             request_stop=getattr(s.recorder,'request_stop',None)
@@ -316,10 +428,13 @@ class Controller(QObject):
                 self.bridge.message.emit(s.id,'result',final)
             except InterruptedError:pass
             except Exception as e:self.bridge.message.emit(s.id,'error',str(e))
-        threading.Thread(target=work,daemon=True).start()
+        profile_thread(target=work,daemon=True).start()
     def receive(self,ident,event,payload):
         s=self.session
         if not s or s.id!=ident or (s.cancel.is_set() and event!='error'):return
+        if event not in ('partial','level'):
+            from .console import event as console_event
+            console_event('session','Stage: %s',event,level='ERROR' if event=='error' else 'INFO')
         if s.assistant and self.keys.cancel_generation!=s.hook_cancel_epoch:
             self.cancel();return
         if event=='started':
@@ -365,6 +480,7 @@ class Controller(QObject):
             self.finish_ask(s,payload,error);return
         if not error and (not isinstance(payload,str) or not payload.strip()):
             payload='The model returned an empty or invalid result. Your original text is preserved.';error=True
+        event('session','%s | mode=%s | recording=%.2fs','Failed' if error else 'Completed',s.mode,s.duration,level='ERROR' if error else 'INFO')
         if not error:self.update_progress(s,complete=True)
         if s.recorder:
             if error:s.recorder.abort()
@@ -485,6 +601,7 @@ class Controller(QObject):
             self.delivery=None
             windows.forget_paste(target,receipt)
     def finish_ask(self,s,payload,error=False):
+        event('session','Ask Anything %s','failed' if error else 'processing result',level='ERROR' if error else 'INFO')
         if s.recorder:
             if error:s.recorder.abort()
             s.duration=s.recorder.duration
@@ -580,12 +697,14 @@ class Controller(QObject):
         if self.session:self.session.focus_changed=True
 
     def cancel(self):
+        if self.startup_busy and not self.quitting:return
         self.clear_delivery()
         self.pending=False;self.pending_generation+=1;self.capture_generation+=1;self.capture_busy=False
         self.result_bubble.hide()
         if self.capture_tx:self.restore_clipboard(self.capture_tx);self.capture_tx=None
         s=self.session;history_saved=True;raw=''
         if s:
+            event('session','Cancelled')
             s.cancel.set()
             if s.recorder:s.recorder.abort();s.duration=s.recorder.duration
             raw=s.raw if s.transcript_complete else (s.recorder.raw if s.recorder else '') or s.raw
@@ -602,8 +721,10 @@ class Controller(QObject):
             self.result_bubble.show_error(message,raw,demo=s.cfg['demo'],status='Cancelled · History not saved',source=self.bubble)
         self.bubble.state('待机',('Cancelled' if history_saved else 'Cancelled · History could not be saved') if s else self.shortcut_hint(),self.store.config['demo'])
     def open_preview(self):
+        if self.startup_blocked():return
         self.selection_target=None;self.selection_original='';self.selection_bookmark=None;self.preview.show_text('','','Enter text or press Alt+Space to capture a selection.',False)
     def capture_selection(self,replace_text=None):
+        if self.startup_blocked():return
         if self.capture_busy:return
         if self.clip_tx:
             self.preview.notice.setText('Clipboard operation in progress. Try again shortly.');self.preview.show();return
@@ -652,8 +773,10 @@ class Controller(QObject):
                 self.preview.show_text(text,'',notice,bool(text) and not self.store.config['demo'] and position_confirmed and bool(t.uia_id and t.editable))
         QTimer.singleShot(80,read)
     def replace(self,text):
+        if self.startup_blocked():return
         if not self.store.config['demo'] and text.strip():self.capture_selection(text)
     def edit(self,raw,mode,instruction):
+        if self.startup_blocked():return
         if self.session or not raw.strip():self.preview.notice.setText('Enter text and wait for the current operation to finish.');return
         if mode=='自定义' and not instruction.strip():self.preview.notice.setText('Enter an editing instruction.');return
         s=Session(mode,copy.deepcopy(self.store.config),None,raw=raw,phase='整理',stopped=time.monotonic(),editor_context=self.preview.editor_context);self.session=s;self.sync_controls();self.bubble.state('整理','Preparing preview',s.cfg['demo'])
@@ -663,11 +786,14 @@ class Controller(QObject):
             try:self.bridge.message.emit(s.id,'result',transform(raw,mode,s.cfg,instruction,s.cancel,usage_sink=self.bridge.usage_received.emit))
             except InterruptedError:pass
             except Exception as e:self.bridge.message.emit(s.id,'error',str(e))
-        threading.Thread(target=work,daemon=True).start()
+        profile_thread(target=work,daemon=True).start()
     def save_settings(self,values,secrets):
+        if self.startup_busy:return
         if self.session:QMessageBox.warning(self.window,'MurMur','Finish the current session before saving settings.');return
         if self.service_tests:
             self.window.settings_status.setText('Wait for the connection check to finish before saving.');return
+        microphone_changed=any(values.get(key)!=self.store.config.get(key) for key in ('microphone','audio_warm_enabled','audio_preroll_ms','demo'))
+        speech_changed=any(values.get(key)!=self.store.config.get(key) for key in ('asr_backend','offline_engine','offline_model_dir','offline_language','offline_threads','offline_acceleration'))
         from urllib.parse import urlparse
         try:
             import math
@@ -698,6 +824,8 @@ class Controller(QObject):
                         if name=='ali_token':credential('ali_token_expiry','')
             if values['startup']!=self.store.config['startup']:windows.startup(values['startup'])
             self.store.config.update(values);self.store.save();self.store.prune();self.keys.machine.cfg=self.store.config;self.bubble.cfg=self.store.config;self.bubble.position();self.result_bubble.cfg=self.store.config;self.result_bubble.position();self.window.refresh()
+            if speech_changed:self.window._runtime_asr_ready=False
+            self.window.check_saved_services()
             for field in ('asr_key','llm_key','ask_llm_key','ali_appkey','ali_token','asr_http_key'):
                 widget=getattr(self.window,field,None)
                 if widget is not None:
@@ -707,25 +835,51 @@ class Controller(QObject):
             if hasattr(self.window,'_http_asr_keys'):
                 self.window._http_asr_keys={key:'' for key in self.window._http_asr_keys}
             self.bubble.state('待机','Changes saved',values['demo']);self.window.settings_status.setText('Changes saved')
+            event('settings','Configuration saved | speech changed=%s | microphone changed=%s',speech_changed,microphone_changed)
+            warm=self.warm_microphone
+            microphone_unhealthy=warm is not None and (warm.error or warm.closed.is_set() or not getattr(warm.stream,'active',True))
+            if self.startup_error or microphone_changed or speech_changed or microphone_unhealthy:self.preload_speech();self.sync_controls()
         except Exception as e:QMessageBox.warning(self.window,'Could not save settings',str(e))
-    def quit(self):
+    def quit(self,quit_app=True):
+        event('app','Shutting down')
         self.clear_delivery()
         self.quitting=True;self.model_cancel.set()
+        self.startup_cancel.set();self.startup_timer.stop();self.startup_id=''
+        if self.warm_microphone:self.warm_microphone.request_close();self.warm_microphone=None
         for _,cancel,_ in self.service_tests.values():cancel.set()
         self.service_tests.clear();self.cancel();self.keys.stop()
         if self.clip_tx:self.restore_clipboard(self.clip_tx)
-        self.tray.hide();self.bubble.hide();self.result_bubble.hide();self.app.quit()
+        self.monitor.stop();self.window.resource_timer.stop()
+        try:self.bridge.usage_received.disconnect(self.record_usage)
+        except (RuntimeError,TypeError):pass
+        self.tray.hide();self.bubble.hide();self.result_bubble.hide()
+        if quit_app:self.app.quit()
 
 def main():
     import multiprocessing
     multiprocessing.freeze_support()
     from .storage import OFFLINE_MODEL_DIR_NAMES
-    parser=argparse.ArgumentParser();parser.add_argument('--tray',action='store_true');parser.add_argument('--no-hotkeys',action='store_true');parser.add_argument('--data-dir');parser.add_argument('--screenshots');parser.add_argument('--transcribe-wav');parser.add_argument('--output-file');parser.add_argument('--offline-model-dir');parser.add_argument('--offline-engine',choices=tuple(OFFLINE_MODEL_DIR_NAMES));parser.add_argument('--offline-acceleration',choices=('cpu','gpu'));args=parser.parse_args()
+    parser=argparse.ArgumentParser(description='MurMur voice assistant');parser.add_argument('--tray',action='store_true');parser.add_argument('--no-hotkeys',action='store_true');parser.add_argument('--data-dir');parser.add_argument('--screenshots');parser.add_argument('--transcribe-wav');parser.add_argument('--output-file');parser.add_argument('--offline-model-dir');parser.add_argument('--offline-engine',choices=tuple(OFFLINE_MODEL_DIR_NAMES));parser.add_argument('--offline-acceleration',choices=('cpu','gpu'))
+    parser.add_argument('--debug',action='store_true',help='Show detailed lifecycle diagnostics (no text content)')
+    parser.add_argument('--log-level',choices=('DEBUG','INFO','WARNING','ERROR'),default='INFO',type=str.upper,help='Console verbosity (default: INFO)')
+    parser.add_argument('--color',choices=('auto','always','never'),default='auto',help='Console color; auto detects a terminal and respects NO_COLOR')
+    args=parser.parse_args();configure('DEBUG' if args.debug else args.log_level,args.color)
+    banner()
+    event('app','MurMur %s | %s',__version__,'WAV transcription' if args.transcribe_wav else 'desktop')
+    event('app','Diagnostics enabled',level='DEBUG')
     if args.transcribe_wav:
         if not args.output_file:parser.error('--transcribe-wav requires --output-file')
         import wave
         from .offline import transcribe_pcm
-        cli_store=Store(args.data_dir);cfg=cli_store.config.copy()
+        from .paths import data_dir
+        from .profiles import ProfileRegistry
+        from .storage import set_credential_scope
+        registry=ProfileRegistry(args.data_dir or data_dir());record=registry.get(registry.current)
+        if record['password'] is not None:
+            if not sys.stdin or not sys.stdin.isatty():raise RuntimeError('This local account is locked. Run from an interactive terminal to enter its password.')
+            import getpass
+            if not registry.authenticate(record['id'],getpass.getpass('Local account password: ')):raise RuntimeError('Incorrect local account password.')
+        set_credential_scope(record['id']);cli_store=Store(registry.folder(record['id']));cfg=cli_store.config.copy()
         selected_engine=args.offline_engine or cfg.get('offline_engine','sensevoice')
         selected_acceleration=args.offline_acceleration or cfg.get('offline_acceleration','cpu')
         if selected_engine=='paraformer':selected_acceleration='cpu'
@@ -739,8 +893,9 @@ def main():
         with wave.open(args.transcribe_wav,'rb') as audio:
             if audio.getnchannels()!=1 or audio.getframerate()!=16000 or audio.getsampwidth()!=2:raise ValueError('Use a mono 16 kHz, 16-bit PCM WAV file.')
             pcm=audio.readframes(audio.getnframes())
-        result=transcribe_pcm(pcm,cfg)
-        Path(args.output_file).write_text(result,'utf-8');return 0
+        event('speech','Transcribing WAV | engine=%s | acceleration=%s | audio=%.2fs',selected_engine,selected_acceleration,len(pcm)/32000)
+        started=time.monotonic();result=transcribe_pcm(pcm,cfg)
+        Path(args.output_file).write_text(result,'utf-8');event('speech','Transcription saved | elapsed=%.2fs',time.monotonic()-started);return 0
     app=QApplication(sys.argv[:1]);app.setStyle('Fusion');app.setApplicationName('MurMur');app.setApplicationVersion(__version__);app.setQuitOnLastWindowClosed(False);app.setStyleSheet(STYLE)
     from PySide6.QtGui import QPalette,QColor
     palette=QPalette()
@@ -750,12 +905,30 @@ def main():
     lock=None
     if not args.data_dir:
         sock=QLocalSocket();sock.connectToServer('MurMur-desktop-v1')
-        if sock.waitForConnected(300):sock.write(b'show');sock.flush();sock.waitForBytesWritten(300);return
+        if sock.waitForConnected(300):
+            event('app','Existing instance found; opening its window')
+            sock.write(b'show');sock.flush();sock.waitForBytesWritten(300);return
         lock=QLocalServer();QLocalServer.removeServer('MurMur-desktop-v1');lock.listen('MurMur-desktop-v1')
-    store=Store(args.data_dir);controller=Controller(app,store,not args.no_hotkeys)
+    account_manager=None
+    from .paths import data_dir
+    from .profiles import ProfileRegistry
+    from .account_ui import AccountDialog,public_profile
+    from .storage import set_credential_scope
+    from .account_manager import AccountManager
+    registry=ProfileRegistry(args.data_dir or data_dir());record=registry.get(registry.current)
+    if record['password'] is not None:
+        dialog=AccountDialog(registry,registry.current,startup=True)
+        if dialog.exec()!=QDialog.Accepted:return 0
+        record=registry.get(dialog.selected)
+    set_credential_scope(record['id']);store=Store(registry.folder(record['id']));store.profile=public_profile(record)
+    controller=Controller(app,store,not args.no_hotkeys)
+    account_manager=AccountManager(app,registry,controller,not args.no_hotkeys)
+    if not args.screenshots:
+        controller.preload_speech()
+        QTimer.singleShot(0,controller.window.enable_saved_service_checks)
     if lock:
         def show():
-            conn=lock.nextPendingConnection();conn.close();controller.show_main()
+            conn=lock.nextPendingConnection();conn.close();(account_manager.controller if account_manager else controller).show_main()
         lock.newConnection.connect(show)
     if not args.tray:controller.show_main()
     if args.screenshots:

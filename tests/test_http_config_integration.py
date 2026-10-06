@@ -67,6 +67,8 @@ def controller(tmp_path,monkeypatch):
                            asr_http_key=field,_http_asr_keys={'openai':'synthetic-draft'})
     c=module.Controller.__new__(module.Controller)
     c.session=None;c.service_tests={};c.window=window;c.store=store;c.bubble=copy.copy(dummy)
+    c.startup_busy=False;c.startup_error='';c.warm_microphone=None
+    c.preload_speech=lambda:None;c.sync_controls=lambda:None
     c.result_bubble=copy.copy(dummy);c.keys=SimpleNamespace(machine=SimpleNamespace(cfg=store.config))
     return c,writes,warnings,cleared
 

@@ -9,6 +9,7 @@ import time
 import threading
 import math
 import stat
+import contextvars
 from pathlib import Path
 from datetime import datetime, timedelta
 from .paths import data_dir, model_root
@@ -25,7 +26,7 @@ LEGACY_PROMPTS=copy.deepcopy(DEFAULTS['prompts'])
 LEGACY_PROMPTS['听写']=LEGACY_DICTATION_PROMPT
 DEFAULTS.update(style='Natural and concise',language='English',bubble_width=224,bubble_height=44,
                 bubble_result_width=400,bubble_follow_mouse=False,bubble_cursor_offset=24,
-                bubble_enter_motion='pop',bubble_exit_motion='pop',bubble_state_motion=True,
+                bubble_enter_motion='pop',bubble_exit_motion='burst',bubble_state_motion=True,
                 bubble_wave_motion=True,bubble_motion_duration=240)
 DEFAULTS['smart_delivery']=True
 DEFAULTS.update(bubble_offset=20,retention=0,save_audio=True,bubble_wave_style='bars')
@@ -41,6 +42,7 @@ DEFAULTS['ali_nls_url']='wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1'
 DEFAULTS.update(asr_http_url='',asr_http_model='',asr_http_language='auto',asr_http_timeout=60,asr_http_profiles={})
 DEFAULTS.update(audio_quality_enabled=True,audio_noise_gate=False,audio_lead_padding_ms=250,
                 audio_tail_padding_ms=180,audio_silence_threshold=0.001)
+DEFAULTS.update(audio_warm_enabled=True,audio_preroll_ms=500)
 PRICE_KEYS=('llm_input_price_per_million','llm_output_price_per_million','llm_cache_price_per_million')
 DEFAULTS.update({key:None for key in PRICE_KEYS})
 DEFAULTS['prompts']={'听写':DICTATION_PROMPT,
@@ -90,7 +92,7 @@ def validated_config(saved):
              'translation_key':{'alt+shift','ctrl+shift+f9','disabled'},
              'selection_key':{'alt+space','ctrl+shift+space','disabled'},
              'bubble_position':{'top','bottom','left','right','top-left','top-right','bottom-left','bottom-right'},
-             'bubble_enter_motion':{'pop','slide','fade','none'},'bubble_exit_motion':{'pop','slide','fade','none'},
+             'bubble_enter_motion':{'pop','slide','fade','none'},'bubble_exit_motion':{'burst','pop','slide','fade','none'},
              'bubble_wave_style':{'bars','centered','dots','line','timeline'},
              'ask_key':{'right_alt+space','ctrl+shift+a','disabled'},
              'asr_backend':{'bailian','offline','ali_nls','openai','groq','http_asr'},'offline_engine':set(OFFLINE_MODEL_DIR_NAMES),
@@ -98,7 +100,7 @@ def validated_config(saved):
     limits={'retention':(0,3650),'bubble_screen':(0,32),'bubble_offset':(0,3650),'bubble_width':(200,360),
             'bubble_height':(40,64),'bubble_result_width':(320,640),'bubble_cursor_offset':(12,160),
             'bubble_motion_duration':(120,500),'offline_threads':(1,8),
-            'asr_http_timeout':(5,180),'audio_lead_padding_ms':(0,2000),'audio_tail_padding_ms':(0,1000)}
+            'asr_http_timeout':(5,180),'audio_lead_padding_ms':(0,2000),'audio_tail_padding_ms':(0,1000),'audio_preroll_ms':(0,2000)}
     for key,value in saved.items():
         if key not in config:continue
         if key=='prompts':
@@ -181,6 +183,7 @@ class Store:
                 self.db.execute('CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, session TEXT UNIQUE, time TEXT, mode TEXT, raw TEXT, final TEXT, duration REAL, latency REAL, language TEXT, demo INTEGER, error TEXT, audio TEXT)')
                 if 'context' not in {row[1] for row in self.db.execute('PRAGMA table_info(history)')}:
                     self.db.execute("ALTER TABLE history ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+                self.db.execute('CREATE INDEX IF NOT EXISTS history_time_id ON history(time DESC,id DESC)')
                 self.db.execute('CREATE TABLE IF NOT EXISTS dictionary(word TEXT PRIMARY KEY COLLATE NOCASE, source TEXT, created TEXT)')
                 self.db.execute('CREATE TABLE IF NOT EXISTS model_usage(request_id TEXT PRIMARY KEY,time TEXT,provider TEXT,model TEXT,local INTEGER,input_tokens INTEGER,output_tokens INTEGER,cached_input_tokens INTEGER,total_tokens INTEGER,cost_usd REAL,status TEXT,pricing_status TEXT,pricing_source TEXT)')
                 self.db.execute('CREATE TABLE IF NOT EXISTS pending_audio_delete(path TEXT PRIMARY KEY)')
@@ -265,6 +268,25 @@ class Store:
 
     def rows(self, query=''):
         return [dict(r) for r in self.db.execute('SELECT * FROM history WHERE raw LIKE ? OR final LIKE ? OR context LIKE ? ORDER BY time DESC,id DESC', (f'%{query}%', f'%{query}%', f'%{query}%'))]
+
+    def history_slice(self, query='', day='', mode='all', limit=None, offset=0, count=False):
+        clauses=[];args=[]
+        if query:
+            clauses.append('(raw LIKE ? OR final LIKE ? OR context LIKE ?)')
+            args.extend([f'%{query}%']*3)
+        if day:
+            clauses.append('time >= ? AND time < ?');args.extend([day,day+'T~'])
+        ask=('随便问','语音编辑','问答','起草')
+        if mode in ('ask','edits'):
+            modes=ask if mode=='ask' else ('听写','翻译',*ask)
+            clauses.append('mode '+('IN' if mode=='ask' else 'NOT IN')+' ('+','.join('?' for _ in modes)+')');args.extend(modes)
+        elif mode!='all':clauses.append('mode = ?');args.append(mode)
+        sql='SELECT '+('COUNT(*)' if count else '*')+' FROM history'
+        if clauses:sql+=' WHERE '+' AND '.join(clauses)
+        if count:return self.db.execute(sql,args).fetchone()[0]
+        sql+=' ORDER BY time DESC,id DESC'
+        if limit is not None:sql+=' LIMIT ? OFFSET ?';args.extend([limit,offset])
+        return [dict(r) for r in self.db.execute(sql,args)]
 
     def delete(self, ids):
         with self.db:
@@ -373,6 +395,19 @@ class Store:
             Path(path).write_text(json.dumps(rows, ensure_ascii=False, indent=2), 'utf-8')
 
 credential_lock = threading.RLock()
+credential_scope=contextvars.ContextVar('murmur_account',default='')
+
+
+def set_credential_scope(identifier):
+    if identifier=='default':identifier=''
+    if identifier and not re.fullmatch(r'[a-f0-9]{32}',identifier):raise ValueError('Invalid account identifier.')
+    credential_scope.set(identifier)
+
+
+def profile_thread(*args,**kwargs):
+    """Capture account context before starting a worker, including nested workers."""
+    context=contextvars.copy_context();target=kwargs.pop('target');target_args=kwargs.pop('args',());target_kwargs=kwargs.pop('kwargs',{}) or {}
+    return threading.Thread(*args,target=lambda:context.run(target,*target_args,**target_kwargs),**kwargs)
 
 
 def credential(name, value=None):
@@ -386,10 +421,11 @@ def _credential(name, value=None):
     from keyring.backends.Windows import WinVaultKeyring
     import keyring.errors
     vault = WinVaultKeyring()
+    scope=credential_scope.get();service='MurMur' if not scope else 'MurMur.Profile.'+scope
     if value is not None:
         if value:
-            vault.set_password('MurMur', name, value)
+            vault.set_password(service, name, value)
         else:
-            try: vault.delete_password('MurMur', name)
+            try: vault.delete_password(service, name)
             except keyring.errors.PasswordDeleteError: pass
-    return vault.get_password('MurMur', name) or ''
+    return vault.get_password(service, name) or ''

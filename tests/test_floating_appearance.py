@@ -2,7 +2,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import pytest
 from PySide6.QtCore import Qt,QRect,QPoint,QSize,QCoreApplication,QEvent
-from PySide6.QtGui import QCursor,QFontDatabase
+from PySide6.QtGui import QCursor,QFontDatabase,QBitmap,QRegion
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from murmur.ui import Bubble,ResultBubble,STYLE
@@ -30,13 +30,15 @@ def test_entry_finishes_at_configured_geometry_without_activating(style,monkeypa
     if style=='none':assert bubble.motion.enter is None
     else:
         animation=bubble.motion.enter;animation.pause();animation.setCurrentTime(110)
-        if style=='pop':assert bubble.width()<target.width()
+        if style=='pop':
+            assert bubble.geometry()==target
+            assert bubble.motion.entry_frame.body_rect().width()<target.width()
         animation.setCurrentTime(240)
     assert bubble.geometry()==target and bubble.windowOpacity()==1.
     bubble.hide()
 
 
-@pytest.mark.parametrize('style',['pop','slide','fade','none'])
+@pytest.mark.parametrize('style',['burst','pop','slide','fade','none'])
 def test_exit_is_inert_and_old_animation_cannot_close_new_session(style):
     bubble=Bubble({'bubble_enter_motion':'none','bubble_exit_motion':style})
     bubble.position();bubble.state('录音');bubble.hide()
@@ -50,6 +52,95 @@ def test_exit_is_inert_and_old_animation_cannot_close_new_session(style):
     bubble.state('录音')
     assert bubble.motion.ghost is None and bubble.motion.exit is None and bubble.isVisible()
     QTest.qWait(260);assert bubble.isVisible()
+    bubble.hide()
+
+
+def test_liquid_pop_releases_from_edge_and_keeps_controls_stable():
+    bubble=Bubble({'bubble_enter_motion':'pop','bubble_exit_motion':'none'})
+    bubble.position();target=QRect(bubble.geometry());bubble.state('录音','00:03')
+    animation=bubble.motion.enter;animation.pause();frame=bubble.motion.entry_frame
+    assert frame.windowFlags()&Qt.WindowTransparentForInput
+    assert frame.windowFlags()&Qt.WindowDoesNotAcceptFocus
+    initial=frame.body_rect()
+    assert initial.center().y()==frame.edge and initial.height()<target.height()*.1
+    controls=QRect(bubble.mic.geometry())
+    animation.setCurrentTime(round(animation.duration()*.50))
+    stretched=frame.body_rect()
+    assert stretched.height()>target.height() and stretched.center().y()<frame.edge
+    assert frame.surface_path().boundingRect().bottom()>stretched.bottom()
+    animation.setCurrentTime(round(animation.duration()*.70))
+    assert frame.body_rect().width()>target.width()
+    assert bubble.mic.geometry()==controls and bubble.geometry()==target
+    animation.setCurrentTime(animation.duration())
+    assert bubble.motion.entry_frame is None and bubble.windowOpacity()==1.
+    bubble.hide()
+
+
+def test_liquid_pop_cancellation_and_restart_remove_old_surface():
+    bubble=Bubble({'bubble_enter_motion':'pop','bubble_exit_motion':'none'})
+    bubble.state('录音');old=bubble.motion.entry_frame
+    bubble.motion.enter.pause();bubble.motion.enter.setCurrentTime(90)
+    bubble.hide()
+    assert not old.isVisible() and bubble.motion.entry_frame is None
+    assert bubble.motion.enter is None and bubble.windowOpacity()==1.
+    bubble.state('录音');new=bubble.motion.entry_frame
+    assert new is not old and new.isVisible()
+    bubble.motion.stop_enter()
+    assert not new.isVisible() and bubble.motion.entry_frame is None
+    bubble.hide()
+
+
+def test_liquid_contact_edge_fades_without_fading_settled_body():
+    bubble=Bubble({'bubble_enter_motion':'pop','bubble_exit_motion':'none'})
+    bubble.state('录音');bubble.motion.enter.pause();frame=bubble.motion.entry_frame
+    frame.set_progress(.50)
+    image=frame.grab().toImage();dpr=image.devicePixelRatio()
+    x=round(frame.target.center().x()*dpr)
+    def alpha(y):return image.pixelColor(x,round(y*dpr)).alpha()
+    assert alpha(frame.edge-2)<alpha(frame.edge-8)<alpha(frame.body_rect().center().y())
+    frame.set_progress(1.)
+    settled=frame.grab().toImage()
+    assert settled.pixelColor(x,round(frame.target.center().y()*dpr)).alpha()==255
+    bubble.hide()
+
+
+@pytest.mark.parametrize('kind',[Bubble,ResultBubble])
+def test_default_burst_finishes_and_removes_inert_surface(kind):
+    cfg=validated_config({})
+    assert cfg['bubble_enter_motion']=='pop' and cfg['bubble_exit_motion']=='burst'
+    bubble=kind(dict(cfg,bubble_enter_motion='none'))
+    if kind is Bubble:bubble.state('录音')
+    else:bubble.show_result('A completed result.')
+    bubble.hide();frame=bubble.motion.ghost;animation=bubble.motion.exit
+    animation.pause();animation.setCurrentTime(round(animation.duration()*.50))
+    assert frame._progress==pytest.approx(.5) and 0<frame.alpha<1
+    assert frame.windowFlags()&Qt.WindowTransparentForInput
+    animation.setCurrentTime(animation.duration())
+    assert bubble.motion.ghost is None and bubble.motion.exit is None
+    assert not bubble.isVisible()
+
+
+def test_burst_splash_uses_bounded_cached_seeds_and_disperses_outside_shell():
+    bubble=Bubble({'bubble_enter_motion':'none','bubble_exit_motion':'burst'})
+    bubble.state('录音');bubble.hide();animation=bubble.motion.exit;animation.pause()
+    frame=bubble.motion.ghost
+    seeds=frame.particles;paths=tuple(item[0] for item in frame.shards)
+    assert len(seeds)==20 and len(paths)==6
+    frame.set_progress(.35);image=frame.grab().toImage()
+    bounds=QRegion(QBitmap.fromImage(image.createAlphaMask())).boundingRect()
+    assert bounds.top()<frame.target.top()*image.devicePixelRatio()-3
+    frame.set_progress(.60);frame.grab()
+    assert frame.particles is seeds and all(a is b[0] for a,b in zip(paths,frame.shards))
+    frame.set_progress(1.)
+    assert QRegion(QBitmap.fromImage(frame.grab().toImage().createAlphaMask())).isEmpty()
+    animation.setCurrentTime(animation.duration())
+
+
+@pytest.mark.parametrize('cfg',[{'bubble_position':'top'},{'bubble_follow_mouse':True}])
+def test_liquid_pop_non_bottom_placement_has_local_origin(cfg):
+    bubble=Bubble(dict(cfg,bubble_enter_motion='pop',bubble_exit_motion='none'))
+    bubble.state('录音');frame=bubble.motion.entry_frame
+    assert 0<=frame.edge-frame.target.bottom()<=21
     bubble.hide()
 
 

@@ -2,6 +2,7 @@
 import math
 import re
 import time
+from functools import lru_cache
 from collections import deque
 from PySide6.QtCore import Qt, QTimer, Signal, Property, QPointF, QRectF, QRect, QSize, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QLocale
 from PySide6.QtGui import QColor, QPainter, QPen, QIcon, QPixmap, QPainterPath, QTextOption, QDoubleValidator, QLinearGradient
@@ -11,8 +12,9 @@ from .bubble_motion import FloatingMotion,placement,number,duration
 STYLE = '''
 QWidget {font-family:"Segoe UI";font-size:13px;color:#f1f1f4;}
 QMainWindow,QDialog,QWidget#page {background:#1c1c1f;}
-QFrame#sidebar {background:#242427;border-radius:14px;}
-QFrame#card {background:#29292d;border:1px solid #323238;border-radius:12px;}
+QMainWindow#MurMurMain {background:transparent;}
+QFrame#sidebar {background:#242427;border-radius:8px;}
+QFrame#card {background:#29292d;border:1px solid #323238;border-radius:10px;}
 QLabel#title {font-size:26px;font-weight:600;}
 QLabel#muted {color:#a4a4ae;}
 QLabel#brand {font-size:19px;font-weight:600;}
@@ -31,6 +33,9 @@ QPushButton#nav {text-align:left;border:1px solid transparent;background:transpa
 QPushButton#nav:hover {background:#2f2f34;}
 QPushButton#nav:pressed {background:#28282e;}
 QPushButton#nav:checked {background:#37373e;color:#ffffff;}
+QPushButton#nav[cutout="true"]:checked {background:transparent;border-color:transparent;}
+QPushButton#nav[settingsEntry="true"] {background:#2c2c31;border-color:#303036;}
+QPushButton#nav[settingsEntry="true"]:hover {background:#333339;}
 QPushButton#nav[keyboardFocus="true"]:focus {border-color:#8c7eb7;}
 QPushButton:disabled {background:#26262b;color:#777780;border-color:#303036;}
 QLineEdit,QTextEdit,QPlainTextEdit,QComboBox,QSpinBox {background:#242428;border:1px solid #3a3a42;border-radius:7px;padding:6px;selection-background-color:#675986;}
@@ -68,6 +73,7 @@ QToolButton::menu-indicator {image:none;width:0;}
 '''
 
 
+@lru_cache(maxsize=128)
 def line_icon(name, size=16, color='#b7b7c3'):
     """Draw crisp, consistently weighted icons without platform font glyphs."""
     pix = QPixmap(size * 2, size * 2)
@@ -91,6 +97,17 @@ def line_icon(name, size=16, color='#b7b7c3'):
     if name == 'home':
         path([(3, 11), (12, 3.5), (21, 11)])
         path([(5.5, 9), (5.5, 20), (10, 20), (10, 14), (14, 14), (14, 20), (18.5, 20), (18.5, 9)])
+    elif name == 'account':
+        p.drawEllipse(QRectF(8,3,8,8));p.drawArc(QRectF(4,13,16,13),0,180*16)
+    elif name == 'rocket':
+        shape=QPainterPath(QPointF(9,16))
+        shape.cubicTo(8,9,14,3,21,3)
+        shape.cubicTo(21,10,15,16,9,16)
+        p.drawPath(shape)
+        p.drawEllipse(QRectF(14,6,4,4))
+        path([(9,10),(5,11),(3,16),(9,15)])
+        path([(14,15),(13,20),(8,22),(9,16)])
+        line(6,18,3,21);line(7,20,6,22)
     elif name == 'history':
         p.drawArc(QRectF(4, 4, 16, 16), -45 * 16, 285 * 16)
         path([(3.5, 4.5), (3.5, 10), (8.5, 10)])
@@ -118,6 +135,8 @@ def line_icon(name, size=16, color='#b7b7c3'):
     elif name == 'close':
         line(5, 5, 19, 19)
         line(5, 19, 19, 5)
+    elif name == 'minimize':
+        line(5, 12, 19, 12)
     elif name == 'play':
         path([(8,5),(19,12),(8,19),(8,5)])
     elif name == 'copy':
@@ -166,6 +185,13 @@ def line_icon(name, size=16, color='#b7b7c3'):
         line(10, 10.5, 10, 17.5)
     elif name == 'check':
         path([(5, 12), (10, 17), (19, 7)])
+    elif name == 'refresh':
+        p.drawArc(QRectF(4,4,16,16),30*16,290*16)
+        path([(16,3),(20,6),(16,9)])
+    elif name == 'external':
+        path([(14,4),(20,4),(20,10)])
+        line(20,4,11,13)
+        path([(10,5),(5,5),(5,19),(19,19),(19,14)])
     elif name in ('arrow_left', 'arrow_right', 'chevron_down'):
         points = {'arrow_left': [(15, 6), (9, 12), (15, 18)], 'arrow_right': [(9, 6), (15, 12), (9, 18)], 'chevron_down': [(6, 9), (12, 15), (18, 9)]}
         path(points[name])
@@ -434,6 +460,7 @@ class Wave(QWidget):
     def rendered_levels(self):
         levels=self.display_levels() if self.animated else ((.2,)*9 if self.active else (0.,)*9)
         count=len(self.bar_positions())
+        if count==1:return (max(levels),)
         # Interpolation keeps the same 0.9-second window when the width changes;
         # it does not invent input energy or change stroke width/spacing.
         result=[]
@@ -487,9 +514,9 @@ class Wave(QWidget):
             p.setPen(Qt.NoPen)
             for x,level in zip(positions,levels):
                 for row in range(-2,3):
-                    lit=level>0 and (abs(row)+.35)/2.7<=level
+                    lit=level>0 and (row==0 or abs(row)/2.4<=level)
                     cell=QColor('#9af1e1' if abs(row)<2 else '#d7a9f5') if lit else QColor(color)
-                    cell.setAlphaF(.88 if lit else .13)
+                    cell.setAlphaF(.35+.53*level if lit else .13)
                     p.setBrush(cell)
                     p.drawRoundedRect(QRectF(x-1.4,center+row*4.8-1.4,2.8,2.8),.65,.65)
             return
@@ -664,7 +691,7 @@ class Bubble(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_actions)
         self.setFixedSize(self.configured_width(), self.configured_height())
-        self.motion=FloatingMotion(self)
+        self.motion=FloatingMotion(self,liquid=True)
         self._state_animation=None
         self._processing = False
         self._state_name = 'Ready'
@@ -814,6 +841,14 @@ class Bubble(QWidget):
             self._update_processing_text()
         self.update()
 
+    def loading_progress(self,percent,detail=''):
+        self.state('Loading',detail)
+        self._progress_step='Ready' if percent>=100 else 'Start mic' if detail.startswith('Preparing microphone') else 'Check files' if percent<15 else 'Load model'
+        self.progress.set_step(self._progress_step)
+        self.progress.set_running(False)
+        self.progress.set_progress(max(0,min(100,int(percent))),100,animate=False)
+        self._update_processing_text();self.update()
+
     def _progress_changed(self):
         if self._processing:
             previous=self.status.text();self._update_processing_text()
@@ -841,6 +876,9 @@ class Bubble(QWidget):
             tooltip = self.session_kind + ' · ' + tooltip
         qualifier='Estimated progress' if self.progress.estimated else 'Completed'
         tooltip += f' · {qualifier}: {self.progress.percentage}%. Completed processing steps: {self.progress.completed_steps} of {self.progress.total_steps}. Not model-internal progress.'
+        if self._state_name=='Loading':
+            tooltip='Speech model loading · '+self._detail+f' · {qualifier}: {self.progress.percentage}%.'
+            if self.progress.estimated:tooltip+=' Native model loading does not report a percentage.'
         if self._progress_step in self.WAIT_PHASES and self.progress.estimated:
             tooltip+=' '+ ' / '.join(self.WAIT_PHASES[self._progress_step])+' are estimated UI phases of one model request, not separate server-reported tasks.'
         self.status.setToolTip(tooltip)
@@ -862,7 +900,8 @@ class Bubble(QWidget):
 
     def state(self, state, detail='', demo=False):
         name = self.STATE_NAMES.get(state, state)
-        visible = name in ('Starting', 'Recording', 'Stopping', 'Transcribing', 'Refining')
+        visible = name in ('Starting', 'Recording', 'Stopping', 'Transcribing', 'Refining', 'Loading')
+        self.close.setEnabled(name!='Loading');self.mic.setEnabled(name!='Loading')
         changed = name != self._state_name
         was_visible=self.isVisible()
         self._state_name, self._detail, self._demo = name, detail, bool(demo)

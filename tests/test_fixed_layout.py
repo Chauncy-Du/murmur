@@ -2,8 +2,8 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 import pytest
-from PySide6.QtCore import Qt,QSize
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtCore import Qt,QSize,QAbstractAnimation,QEvent,QPointF,QPoint
+from PySide6.QtGui import QFontDatabase,QMouseEvent
 from PySide6.QtWidgets import QApplication, QInputDialog, QDialog
 from PySide6.QtTest import QTest
 from murmur import storage
@@ -27,11 +27,44 @@ def window(tmp_path,monkeypatch):
 
 @pytest.mark.parametrize('attempt',[(640,400),(1400,1000)])
 def test_main_window_cannot_resize_or_maximize(window,attempt):
-    size=QSize(920,680)
+    size=QSize(940,600)
     assert window.minimumSize()==window.maximumSize()==size
     assert not window.windowFlags() & Qt.WindowMaximizeButtonHint
+    assert window.windowFlags() & Qt.FramelessWindowHint
     window.resize(*attempt);QApplication.processEvents()
     assert window.size()==size
+
+
+def test_sidebar_highlight_slides_and_empty_status_collapses(window):
+    sidebar=window.main_sidebar
+    start=sidebar.get_top();window.navigate(1)
+    assert sidebar.slide.state()==QAbstractAnimation.Running
+    QTest.qWait(80)
+    assert start<sidebar.get_top()<window.nav_buttons[1].y()
+    window.navigate(2);QTest.qWait(220)
+    assert sidebar.get_top()==window.nav_buttons[2].y()
+    assert window.nav_buttons[2].isChecked() and window.nav_buttons[2].property('cutout')
+    assert window.nav_buttons[3].property('settingsEntry')
+    from PySide6.QtWidgets import QWidget
+    assert not isinstance(window.home_status,QWidget)
+    window.home_status.setText('Transcribing…')
+    assert window.home_status.text()=='Transcribing…'
+    window.home_status.clear();assert window.home_status.text()==''
+
+
+def test_header_drag_uses_global_logical_coordinates_and_releases_capture(window):
+    original=window.pos();global_start=window.mapToGlobal(QPoint(35,25));delta=QPoint(45,30)
+    press=QMouseEvent(QEvent.MouseButtonPress,QPointF(35,25),QPointF(global_start),Qt.LeftButton,Qt.LeftButton,Qt.NoModifier)
+    QApplication.sendEvent(window.centralWidget(),press)
+    assert window.window_drag.offset is not None
+    move=QMouseEvent(QEvent.MouseMove,QPointF(35,25),QPointF(global_start+delta),Qt.NoButton,Qt.LeftButton,Qt.NoModifier)
+    QApplication.sendEvent(window,move)
+    assert window.pos()==original+delta
+    release=QMouseEvent(QEvent.MouseButtonRelease,QPointF(35,25),QPointF(global_start+delta),Qt.LeftButton,Qt.NoButton,Qt.NoModifier)
+    QApplication.sendEvent(window,release)
+    assert window.window_drag.offset is None
+    assert window.centralWidget().objectName()=='windowShell'
+    assert 'border:2px' in window.centralWidget().styleSheet()
 
 def test_settings_replaces_main_sidebar_and_returns_to_previous_page(window):
     window.navigate(2);window.navigate(3);QTest.qWait(180)
@@ -52,6 +85,9 @@ def test_home_activity_values_and_shortcut_caps_follow_saved_data(window):
     assert [cap.text() for cap in window.quick_keycaps['selection_key'] if not cap.isHidden()]==['Ctrl','Shift','Space']
     assert window.stack.widget(0).verticalScrollBar().maximum()==0
     assert window.stack.widget(0).horizontalScrollBar().maximum()==0
+    window.filter_day(s.rows()[0]['time'][:10]);QApplication.processEvents()
+    assert not window.calendar_legend.isHidden() and window.day_summary_row.isHidden()
+    assert window.stack.widget(0).verticalScrollBar().maximum()==0
 
 def test_usage_dialog_is_fixed_and_home_shows_actual_metadata(window):
     window.store.record_usage(dict(request_id='public-usage',local=False,total_tokens=7,cost_usd=.03))
@@ -61,9 +97,9 @@ def test_usage_dialog_is_fixed_and_home_shows_actual_metadata(window):
     assert window.home_cost_hint.text()=='$0.03'
     assert '$0.030000 USD' in window.home_cost_hint.toolTip()
     window.show_token_insights();dialog=window.token_dialog
-    assert dialog.minimumSize()==dialog.maximumSize()==QSize(420,330)
+    assert dialog.minimumSize()==dialog.maximumSize()==QSize(480,320)
     dialog.resize(600,500);QApplication.processEvents()
-    assert dialog.size()==QSize(420,330)
+    assert dialog.size()==QSize(480,320)
     window.store.record_usage(dict(request_id='public-large-local',local=True,total_tokens=1250000,cost_usd=0))
     window.store.record_usage(dict(request_id='public-large-external',local=False,total_tokens=4565432,cost_usd=None))
     window.refresh_token_insights();QApplication.processEvents()

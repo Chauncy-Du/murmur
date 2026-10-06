@@ -114,11 +114,16 @@ def test_file_presence_hides_install_but_does_not_claim_model_test_success(windo
 
 
 def test_audio_controls_snapshot_and_bounds(window):
+    assert window.fields['audio_warm_enabled'].isChecked()
+    assert window.fields['audio_preroll_ms'].value()==500
+    window.fields['audio_warm_enabled'].setChecked(False)
+    window.fields['audio_preroll_ms'].setValue(800)
     window.fields['audio_quality_enabled'].setChecked(False)
     window.fields['audio_noise_gate'].setChecked(True)
     window.fields['audio_lead_padding_ms'].setValue(500)
     window.fields['audio_tail_padding_ms'].setValue(260)
     cfg,_=window.service_test_values()
+    assert cfg['audio_warm_enabled'] is False and cfg['audio_preroll_ms']==800
     assert cfg['audio_quality_enabled'] is False and cfg['audio_noise_gate'] is True
     assert cfg['audio_lead_padding_ms']==500 and cfg['audio_tail_padding_ms']==260
     assert window.fields['audio_lead_padding_ms'].maximum()==2000

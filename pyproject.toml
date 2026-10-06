@@ -1,6 +1,6 @@
 [project]
 name = "murmur-desktop"
-version = "0.4.6"
+version = "0.4.7"
 description = "Windows voice dictation assistant"
 requires-python = ">=3.12"
 dependencies = [

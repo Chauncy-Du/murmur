@@ -1,3 +1,4 @@
+from .storage import profile_thread
 import queue
 import json
 import re
@@ -251,7 +252,7 @@ def _chat_completion(messages, cfg, key, cancel=None, usage_sink=None, extra_bod
                         try:client.close()
                         except Exception:pass
                         return
-            if cancel:threading.Thread(target=watch_cancel,name='MurMur-LLM-cancel',daemon=True).start()
+            if cancel:profile_thread(target=watch_cancel,name='MurMur-LLM-cancel',daemon=True).start()
             try:
                 resolved_cfg=dict(cfg,llm_model=resolve_model(client,cfg,cancel))
                 if projecthub.is_projecthub(base):
@@ -442,7 +443,7 @@ class Recorder:
             try:self._stop_recognition()
             except Exception:self.error='Could not finish the ASR request.'
             finally:stopping.set()
-        threading.Thread(target=finish,daemon=True).start()
+        profile_thread(target=finish,daemon=True).start()
         if not stopping.wait(20):raise RuntimeError('ASR completion timed out. Your original text is preserved.')
         if self.cancel.is_set():raise InterruptedError()
         if self.error: raise RuntimeError(self.error)
@@ -472,7 +473,7 @@ class Recorder:
                 except Exception:pass
             try:self._stop_recognition()
             except Exception:pass
-        threading.Thread(target=cleanup,name='MurMur-audio-cleanup',daemon=True).start()
+        profile_thread(target=cleanup,name='MurMur-audio-cleanup',daemon=True).start()
 
     def _stop_recognition(self):
         with self._recognition_stop_lock:
@@ -487,7 +488,7 @@ class Recorder:
                 worker=getattr(self.recognition,'_worker',None)
                 if isinstance(worker,threading.Thread) and worker.is_alive():
                     def release_later():worker.join();self._release_asr_slot()
-                    threading.Thread(target=release_later,name='MurMur-ASR-retire',daemon=True).start()
+                    profile_thread(target=release_later,name='MurMur-ASR-retire',daemon=True).start()
                 else:self._release_asr_slot()
 
     def _release_asr_slot(self):

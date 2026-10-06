@@ -1,4 +1,4 @@
-"""One bounded, capture-first PCM path. No microphone runs while idle.
+"""One bounded capture path, optionally leased from persistent microphone input.
 
 Callbacks never send network data or load models. A deferred collector retains
 at most fifty 100 ms frames until a provider calls activate(). Overflow fails
@@ -119,7 +119,8 @@ class PCMCollector:
         try:
             self.check()
             import sounddevice as sd
-            stream = sd.RawInputStream(
+            warm=self.cfg.get('_warm_microphone')
+            stream = warm.attach(self) if warm is not None else sd.RawInputStream(
                 samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1,
                 dtype='int16', device=int(self.cfg.get('microphone', ''))
                 if self.cfg.get('microphone') else None, callback=self._audio)
@@ -226,6 +227,8 @@ class PCMCollector:
             self.closed = True
             if not self._start_claimed:
                 self._start_finished.set()
+        warm=self.cfg.get('_warm_microphone')
+        if warm is not None:warm.detach(self)
         self._schedule_close()
 
     def stop(self):
@@ -275,5 +278,7 @@ class PCMCollector:
         with self.frames.mutex:
             self.frames.queue.clear()
             self.frames.not_full.notify_all()
+        warm=self.cfg.get('_warm_microphone')
+        if warm is not None:warm.detach(self)
         if not already:
             self._schedule_close()

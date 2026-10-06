@@ -923,7 +923,7 @@ wheels = [
 
 [[package]]
 name = "murmur-desktop"
-version = "0.4.6"
+version = "0.4.7"
 source = { editable = "." }
 dependencies = [
     { name = "comtypes", marker = "sys_platform == 'win32'" },

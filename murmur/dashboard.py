@@ -1,12 +1,14 @@
 """A compact English desktop shell with local history and reviewed vocabulary."""
+from .storage import profile_thread
 import calendar as calendar_names
 import sqlite3
 import threading
+import time
 from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import date, datetime, timedelta
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QSize, QTimer
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QSize, QTimer,QUrl,Property,QPropertyAnimation,QEasingCurve
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QShortcut, QKeySequence,QDesktopServices,QRegion
 from PySide6.QtWidgets import *
 from .ui import SettingsForm, CompactComboBox, AdvancedSection, button, label, icon, line_icon, dark_titlebar
 from .insights import insights, analyze_vocabulary
@@ -74,114 +76,33 @@ def icon_button(name, tooltip, callback=None):
     return b
 
 
-class ActivityCalendar(QWidget):
-    day_clicked = Signal(str)
-    PALETTE = ['#434048', '#4c3c69', '#6b5193', '#9570c4', HOME_ACCENT]
-    GAP = 4
-
-    def __init__(self):
-        super().__init__()
-        self.daily = {}
-        self.cells = []
-        self.end = date.today()
-        self.setFixedHeight(140)
-        self.setMouseTracking(True)
-        self.hover_day = None
-        self.setAccessibleName('Activity calendar. Select a day to view sessions.')
-
-    def set_data(self, daily):
-        self.daily = daily
-        self.update()
-
-    def shift(self, weeks):
-        self.end = min(date.today(), self.end + timedelta(weeks=weeks))
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        font = p.font()
-        font.setPixelSize(10)
-        p.setFont(font)
-        self.cells = []
-        columns = 26
-        dpr = max(1., self.devicePixelRatioF())
-        left, top = round(24 * dpr) / dpr, round(6 * dpr) / dpr
-        gap = round(self.GAP * dpr) / dpr
-        desired = (self.width() - left - (columns - 1) * gap) / columns
-        size = int(max(6, min(12, desired)) * dpr) / dpr
-        step = size + gap
-        start = self.end - timedelta(days=(self.end.weekday() + 1) % 7 + 25 * 7)
-        maximum = max(self.daily.values(), default=1)
-        first_activity = min(self.daily, default=start)
-        for r, text in enumerate(('S', 'M', 'T', 'W', 'T', 'F', 'S')):
-            p.setPen(QColor('#9696a2'))
-            p.drawText(0, int(top + r * step + size / 2 + 3), text)
-        for c in range(columns):
-            sunday = start + timedelta(weeks=c)
-            if c == 0 or sunday.month != (sunday - timedelta(weeks=1)).month:
-                p.setPen(QColor('#9696a2'))
-                p.drawText(int(left + c * step), int(top + 7 * step + 13), calendar_names.month_abbr[sunday.month])
-            for r in range(7):
-                day = sunday + timedelta(days=r)
-                if day > self.end:
-                    continue
-                count = self.daily.get(day, 0)
-                level = 0 if not count else max(1, min(4, int(count / maximum * 4)))
-                rect = QRectF(left + c * step, top + r * step, size, size)
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(self.PALETTE[level]))
-                p.drawRoundedRect(rect, 2.5, 2.5)
-                if day < first_activity:
-                    p.save()
-                    clip = QPainterPath();clip.addRoundedRect(rect, 2.5, 2.5)
-                    p.setClipPath(clip)
-                    p.fillRect(rect, QColor('#353438'))
-                    p.setPen(QPen(QColor('#4b494f'), .6))
-                    for stripe in range(-12, 25, 4):
-                        p.drawLine(rect.topLeft() + QPointF(stripe, size), rect.topLeft() + QPointF(stripe + size, 0))
-                    p.restore()
-                if day == self.hover_day:
-                    p.setPen(QPen(QColor('#e5dbff'), 1))
-                    p.setBrush(Qt.NoBrush)
-                    p.drawRoundedRect(rect.adjusted(.5, .5, -.5, -.5), 2, 2)
-                self.cells.append((rect, day, count))
-
-    def mouseMoveEvent(self, event):
-        for rect, day, count in self.cells:
-            if rect.contains(event.position()):
-                if self.hover_day != day:
-                    self.hover_day = day;self.update()
-                self.setCursor(Qt.PointingHandCursor)
-                self.setToolTip(f'{human_date(day)} · {count} session' + ('' if count == 1 else 's'))
-                return
-        self.unsetCursor()
-        self.setToolTip('')
-        if self.hover_day is not None:self.hover_day = None;self.update()
-
-    def leaveEvent(self, event):
-        self.hover_day = None;self.update()
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton:
-            return
-        for rect, day, count in self.cells:
-            if rect.contains(event.position()):
-                self.day_clicked.emit(day.isoformat())
-                return
+from .activity_calendar import ActivityCalendar
 
 
 class MainWindow(SettingsForm):
     analysis_ready = Signal(object, str)
+    release_ready = Signal(object)
+    resources_ready = Signal(object)
+    availability_ready = Signal(object)
     install_offline = Signal()
     cancel = Signal()
     service_test = Signal(str, dict, dict)
     ask = Signal()
+    account_requested=Signal()
 
     def __init__(self, store):
         QMainWindow.__init__(self)
         self.store = store
+        self.version_text=__version__
+        self._release_busy=False;self._release_result=None;self._release_checked_at=0.
+        self._resource_busy=False;self._checks_enabled=False;self._availability_generation=0;self._runtime_asr_ready=False
+        self.release_ready.connect(self.apply_release_result)
+        self.resources_ready.connect(self.apply_resources)
+        self.availability_ready.connect(self.apply_availability)
+        from .system_resources import ResourceSampler
+        self.resource_sampler=ResourceSampler()
+        self.resource_timer=QTimer(self);self.resource_timer.setInterval(2000)
+        self.resource_timer.timeout.connect(self.refresh_resources)
         self.fields = {}
         self.prompt_fields = {}
         self.service_test_controls = {'asr': [], 'llm': [], 'ask': []}
@@ -201,7 +122,7 @@ class MainWindow(SettingsForm):
         self._offline_download_busy = False
         self.current_rows = []
         self.day_filter = ''
-        self.history_limit = 60
+        self.history_limit = 0
         self.analysis_version = 0
         self._session_phase = 'idle'
         self._session_mode = None
@@ -212,18 +133,25 @@ class MainWindow(SettingsForm):
         self.escape_shortcut.setEnabled(False)
         self.escape_shortcut.activated.connect(self.cancel.emit)
         self.setWindowTitle('MurMur')
+        self.setObjectName('MurMurMain')
         self.setWindowIcon(icon())
-        self.setFixedSize(920, 680)
+        self.setFixedSize(940, 600)
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet('QMainWindow {background:transparent;}')
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, False)
         self.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, True)
         self._settings_return_page = 0
-        root = QWidget()
-        root.setObjectName('page')
+        root = QFrame()
+        root.setObjectName('windowShell')
+        root.setStyleSheet('QWidget {font-size:12px;} QLabel#title {font-size:24px;} QLabel#brand {font-size:20px;} QLabel#eyebrow {font-size:12px;} QFrame#windowShell {background:#1c1c1f;border:2px solid #514a5e;border-radius:14px;}')
         self.setCentralWidget(root)
         outer = QHBoxLayout(root)
-        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(0)
-        side = QFrame()
+        from .window_chrome import NavigationSidebar,WindowDrag
+        self.window_drag=WindowDrag(self)
+        side = NavigationSidebar()
         self.main_sidebar = side
         side.setObjectName('sidebar')
         side.setFixedWidth(160)
@@ -245,22 +173,24 @@ class MainWindow(SettingsForm):
             b = button(text, lambda checked=False, index=i: self.navigate(index), navigation=True)
             b.setIcon(line_icon(name))
             b.setObjectName('nav')
+            b.setProperty('cutout',True)
             b.setCheckable(True)
             nav.addWidget(b)
             self.nav_buttons.append(b)
         nav.addStretch()
         self.badge = label('Demo mode', 'muted')
-        self.badge.setStyleSheet('font-size:11px;padding:0 9px;')
+        self.badge.setStyleSheet('font-size:12px;padding:0 9px;')
         nav.addWidget(self.badge)
-        nav.addSpacing(8)
+        self.badge.hide()
         b = button('Settings', lambda: self.navigate(3), navigation=True)
         b.setIcon(line_icon('settings'))
         b.setObjectName('nav')
+        b.setProperty('settingsEntry',True)
         b.setCheckable(True)
         nav.addWidget(b)
         self.nav_buttons.append(b)
         version = label(__version__ + ' · Stored locally', 'muted')
-        version.setStyleSheet('font-size:10px;padding:0 9px;')
+        version.setStyleSheet('font-size:12px;padding:0 9px;')
         nav.addWidget(version)
         outer.addWidget(side)
         outer.addWidget(self.stack, 1)
@@ -280,7 +210,9 @@ class MainWindow(SettingsForm):
             content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         layout.setContentsMargins(24, 20, 20, 18)
         layout.setSpacing(12)
-        layout.addWidget(label(title, 'title'))
+        if title:
+            from .window_chrome import window_controls
+            heading=QHBoxLayout();heading.addWidget(label(title,'title'),1);heading.addWidget(window_controls(self));layout.addLayout(heading)
         if subtitle:
             layout.addWidget(label(subtitle, 'muted'))
         if scrollable:
@@ -293,186 +225,171 @@ class MainWindow(SettingsForm):
         return layout
 
     def overview(self):
-        layout = self.page('Speak your mind.', 'Less typing. More flow.')
-        layout.setSpacing(10)
-        page = layout.parentWidget()
-        page.setStyleSheet('QFrame#homeInsight{background:#333137;border:1px solid #3c3942;border-radius:16px;}QFrame#homeAside{background:#2b292e;border:1px solid #343139;border-radius:14px;}QLabel#metric{font-size:22px;font-weight:600;color:'+HOME_ACCENT+';}')
-        head = QHBoxLayout()
-        head.addWidget(label('Insights'))
-        head.addStretch()
-        self.stats_source = CompactComboBox()
-        self.stats_source.addItem('Your sessions', False)
-        self.stats_source.addItem('Demo data', True)
-        self.stats_source.setFixedWidth(138)
-        self.stats_source.currentIndexChanged.connect(self.refresh)
-        head.addWidget(self.stats_source)
-        layout.addLayout(head)
-        columns = QHBoxLayout()
-        columns.setSpacing(14)
-        main = QVBoxLayout()
-        main.setSpacing(10)
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.metric_values = []
-        for i, title in enumerate(('Characters', 'Recording time', 'Characters per minute', 'Sessions')):
-            frame, body = card()
-            frame.setObjectName('homeInsight')
-            frame.setFixedHeight(68)
-            body.setContentsMargins(14, 9, 14, 9)
-            body.setSpacing(3)
-            value = label('0', 'metric')
-            body.addWidget(value)
-            caption = label(title, 'muted')
-            caption.setStyleSheet('font-size:11px;color:#b2acba;')
-            body.addWidget(caption)
-            self.metric_values.append(value)
-            grid.addWidget(frame, i // 2, i % 2)
-        main.addLayout(grid)
-        frame, body = card()
-        frame.setObjectName('homeInsight')
-        body.setContentsMargins(14, 13, 14, 10)
-        body.setSpacing(8)
-        self.activity_metrics = label('')
-        self.activity_metrics.hide()
-        streaks = QHBoxLayout()
-        streaks.setSpacing(12)
-        self.activity_values = []
-        for title in ('Active days', 'Current streak', 'Longest streak'):
-            metric = QVBoxLayout()
-            metric.setSpacing(2)
-            value = label('0')
-            value.setStyleSheet('font-size:21px;font-weight:600;color:'+HOME_ACCENT+';')
-            metric.addWidget(value)
-            caption = label(title, 'muted')
-            caption.setStyleSheet('font-size:10px;color:#b2acba;')
-            caption.setWordWrap(False)
-            metric.addWidget(caption)
-            streaks.addLayout(metric, 1)
-            self.activity_values.append(value)
-        body.addLayout(streaks)
-        body.addSpacing(5)
-        self.calendar = ActivityCalendar()
-        self.calendar.day_clicked.connect(self.filter_day)
-        body.addWidget(self.calendar)
-        caption = QHBoxLayout()
-        caption.setSpacing(4)
-        caption.addWidget(label('Less', 'eyebrow'))
-        for color in ActivityCalendar.PALETTE:
-            dot = QLabel()
-            dot.setFixedSize(9, 9)
-            dot.setStyleSheet(f'background:{color};border-radius:2px;')
-            caption.addWidget(dot)
-        caption.addWidget(label('More', 'eyebrow'))
-        caption.addStretch()
-        note = label('26 weeks', 'muted')
-        note.setStyleSheet('font-size:10px;')
-        note.setWordWrap(False)
-        caption.addWidget(note)
-        caption.addWidget(icon_button('arrow_left', 'Previous four weeks', lambda: self.calendar.shift(-4)))
-        caption.addWidget(icon_button('arrow_right', 'Next four weeks', lambda: self.calendar.shift(4)))
-        body.addLayout(caption)
-        main.addWidget(frame)
-        main.addStretch()
-        columns.addLayout(main, 1)
-        aside = QWidget()
-        aside.setFixedWidth(164)
-        aside_layout = QVBoxLayout(aside)
-        aside_layout.setContentsMargins(0, 0, 0, 0)
-        aside_layout.setSpacing(12)
-        shortcuts, shortcut_body = card()
-        shortcuts.setObjectName('homeAside')
-        shortcut_body.setContentsMargins(12, 12, 12, 12)
-        shortcut_body.setSpacing(12)
-        heading = QHBoxLayout()
-        heading.addWidget(label('Shortcuts'), 1)
-        heading.addWidget(icon_button('settings', 'Edit shortcuts', self.open_shortcut_settings))
-        shortcut_body.addLayout(heading)
-        self.quick_keycaps = {}
-        for key, title in [('dictation_key', 'Dictation'), ('translation_key', 'Translate'), ('ask_key', 'Ask Anything'), ('selection_key', 'Edit selection')]:
-            item = QVBoxLayout()
-            item.setSpacing(5)
-            title_label = label(title, 'muted')
-            title_label.setStyleSheet('font-size:11px;color:#b6b0bf;')
-            item.addWidget(title_label)
-            keys = QHBoxLayout()
-            keys.setSpacing(4)
-            caps = []
-            for _ in range(3):
-                cap = QLabel()
-                cap.setWordWrap(False)
-                cap.setStyleSheet('font-size:10px;background:#39363e;border:1px solid #504b58;border-radius:4px;padding:2px 4px;')
-                keys.addWidget(cap)
-                caps.append(cap)
-            keys.addStretch()
-            self.quick_keycaps[key] = caps
-            item.addLayout(keys)
-            shortcut_body.addLayout(item)
-        aside_layout.addWidget(shortcuts)
-        usage, usage_body = card()
-        usage.setObjectName('homeAside')
-        usage_body.setContentsMargins(12, 12, 12, 12)
-        usage_body.setSpacing(8)
-        usage_heading = QHBoxLayout()
-        usage_heading.setSpacing(2)
-        usage_heading.addWidget(label('Token usage'), 1)
-        self.token_insight_button = icon_button('arrow_right', 'View token usage details', self.show_token_insights)
-        self.token_insight_button.setIcon(line_icon('arrow_right',14,HOME_ACCENT))
-        usage_heading.addWidget(self.token_insight_button)
-        usage_body.addLayout(usage_heading)
-        token_counts = QHBoxLayout()
-        token_counts.setSpacing(8)
-        for name, title in (('home_local_tokens','Local'),('home_external_tokens','External')):
-            column = QVBoxLayout()
-            column.setSpacing(2)
-            caption = label(title,'muted')
-            caption.setStyleSheet('font-size:10px;')
-            column.addWidget(caption)
-            value = label('0')
-            value.setWordWrap(False)
-            value.setMinimumWidth(0)
-            value.setStyleSheet('font-size:18px;font-weight:600;color:'+HOME_ACCENT+';')
-            setattr(self,name,value)
-            column.addWidget(value)
-            token_counts.addLayout(column,1)
-        usage_body.addLayout(token_counts)
-        cost = QVBoxLayout()
-        cost.setSpacing(2)
-        cost_caption = label('Known API cost · USD','muted')
-        cost_caption.setStyleSheet('font-size:10px;')
-        cost.addWidget(cost_caption)
-        self.home_cost_hint = label('$0')
-        self.home_cost_hint.setWordWrap(False)
-        self.home_cost_hint.setStyleSheet('font-size:14px;font-weight:600;color:'+HOME_ACCENT+';')
-        cost.addWidget(self.home_cost_hint)
-        usage_body.addLayout(cost)
-        aside_layout.addWidget(usage)
-        aside_layout.addStretch()
-        columns.addWidget(aside)
-        layout.addLayout(columns, 1)
-        self.home_status = label('', 'muted')
-        self.home_status.setStyleSheet('font-size:11px;')
-        layout.addWidget(self.home_status)
-        actions = QHBoxLayout()
-        record = button('Record to preview', self.record.emit, True)
-        record.setIcon(line_icon('mic', 14, '#282035'))
-        self.record_button = record
-        actions.addWidget(record)
-        self.translation_button = button('Translate', self.translate.emit)
-        actions.addWidget(self.translation_button)
-        self.ask_button = button('Ask Anything', self.ask.emit)
-        actions.addWidget(self.ask_button)
-        self.edit_selection_button = button('Edit selection', self.preview.emit)
-        actions.addWidget(self.edit_selection_button)
-        actions.addStretch()
-        actions.addWidget(icon_button('chart', 'Activity details', self.show_activity_details))
-        actions.addWidget(icon_button('info', 'How insights are measured', self.explain_metrics))
-        layout.addLayout(actions)
+        from .home_page import build_home
+        build_home(self)
 
     def navigate(self, index):
         if index == 3 and self.stack.currentIndex() != 3:
             self._settings_return_page = max(0, self.stack.currentIndex())
         self.main_sidebar.setVisible(index != 3)
-        super().navigate(index)
+        if index!=1:self._history_render_timer.stop()
+        # Avoid rebuilding unchanged cards and rasterizing the entire scroll
+        # content into an opacity effect on every navigation.
+        self.stack.setCurrentIndex(index)
+        for i, control in enumerate(self.nav_buttons):control.setChecked(i==index)
+        if index==0:self.refresh()
+        elif index==1:self.build_history()
+        elif index==2:self.refresh_words()
+        else:self.update_credential_status()
+        if index!=3:
+            self.main_sidebar.layout().activate()
+            self.main_sidebar.select(self.nav_buttons[index])
+        self.sync_resource_timer()
+        self.corner_controls.place()
+
+    def showEvent(self,event):
+        super().showEvent(event)
+        self.sync_resource_timer()
+        self.refresh_configuration()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        # Leave one pixel for the antialiased outer stroke before hard clipping.
+        path=QPainterPath();path.addRoundedRect(QRectF(self.rect()).adjusted(-1,-1,1,1),14,14)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def hideEvent(self,event):
+        self.resource_timer.stop()
+        self._history_render_timer.stop()
+        super().hideEvent(event)
+
+    def sync_resource_timer(self):
+        if self.isVisible() and self.stack.currentIndex()==0:
+            self.resource_sampler.previous=None
+            self.resource_sampler.sample_time=None
+            self.refresh_resources();self.resource_timer.start()
+        else:self.resource_timer.stop()
+
+    def refresh_resources(self):
+        if not self.isVisible() or self.stack.currentIndex()!=0 or self._resource_busy:return
+        self._resource_busy=True
+        def work():
+            try:sample=self.resource_sampler.sample()
+            except Exception as exc:
+                from .console import event
+                event('resources','Process sampling unavailable (%s)',type(exc).__name__,level='DEBUG');sample={}
+            # An account switch can dispose the window before native sampling
+            # finishes. PySide may report its stale signal as RuntimeError or
+            # TypeError during teardown; discard that result.
+            from shiboken6 import isValid
+            if not isValid(self):return
+            try:self.resources_ready.emit(sample)
+            except (RuntimeError,TypeError):pass
+        profile_thread(target=work,name='murmur-resources',daemon=True).start()
+
+    def apply_resources(self,sample):
+        self._resource_busy=False
+        if not self.isVisible() or self.stack.currentIndex()!=0:return
+        if not sample:
+            for key,widget in self.resource_labels.items():
+                widget.setText('N/A');self.resource_bars[key].set_value(None)
+            return
+        cpu=sample['cpu_percent'];memory=sample['memory_percent'];process=sample['process_mb']
+        self.resource_labels['cpu'].setText('Sampling…' if cpu is None else f'{cpu:.0f}%')
+        self.resource_labels['memory'].setText('N/A' if process is None else f'{process:,.0f} MB')
+        self.resource_labels['memory'].setToolTip('MurMur RAM unavailable' if memory is None else f"MurMur + child workers · {memory:.2f}% of {sample['memory_total_gb']:.1f} GB RAM")
+        self.resource_labels['cpu'].setToolTip('MurMur + child workers · Percentage of total CPU capacity · Updated every 2 seconds.')
+        gpu=sample.get('gpu_percent')
+        self.resource_labels['gpu'].setText('N/A' if gpu is None else f"{sample['gpu_used_gb']:.1f}/{sample['gpu_total_gb']:.0f} GB")
+        self.resource_labels['gpu'].setToolTip('MurMur process GPU memory unavailable for this driver' if gpu is None else f"MurMur + child workers · Dedicated VRAM · {gpu:.2f}% · Shared RAM excluded")
+        for key,value in (('cpu',cpu),('memory',memory),('gpu',gpu)):
+            self.resource_bars[key].set_value(value)
+
+    def refresh_configuration(self):
+        from .provider_icons import provider_icon
+        from .service_identity import model_source_label
+        from .models import model_spec
+        cfg=self.store.config
+        if cfg.get('demo'):speech='Demo · sample output'
+        elif cfg.get('asr_backend')=='offline':
+            speech=model_spec(cfg.get('offline_engine','sensevoice'),cfg.get('offline_acceleration','cpu'))['name']+' · '+cfg.get('offline_acceleration','cpu').upper()
+        else:
+            names={'bailian':'Bailian','ali_nls':'Alibaba NLS','openai':'OpenAI','groq':'Groq','http_asr':'Custom API'}
+            backend=cfg.get('asr_backend')
+            model='Real-time' if backend=='ali_nls' else cfg.get('asr_http_model','') if backend in ('openai','groq','http_asr') else cfg.get('asr_model','')
+            speech=names.get(backend,'Speech API')+(' · '+str(model) if model else '')
+        values={'asr':speech,'llm':model_source_label(cfg.get('llm_url',''))+' · '+('Auto' if cfg.get('ollama_auto') and is_local_endpoint(cfg.get('llm_url','')) else cfg.get('llm_model','')),
+                'ask':model_source_label(cfg.get('ask_llm_url',''))+' · '+cfg.get('ask_llm_model','')}
+        if not cfg.get('polish',True):values['llm']+=' · Polish off'
+        engine=cfg.get('offline_engine','sensevoice')
+        speech_short={'sensevoice':'SenseVoice','paraformer':'Paraformer','funasr-nano':'Fun-ASR Nano','qwen3-asr':'Qwen3-ASR'}.get(engine,engine)
+        compact={'asr':speech_short+' · '+cfg.get('offline_acceleration','cpu').upper() if cfg.get('asr_backend')=='offline' and not cfg.get('demo') else speech,
+                 'llm':'Local · Auto' if cfg.get('ollama_auto') and is_local_endpoint(cfg.get('llm_url','')) else cfg.get('llm_model',''),
+                 'ask':cfg.get('ask_llm_model','')}
+        icons={'asr':engine if cfg.get('asr_backend')=='offline' else 'cloud-speech',
+               'llm':'local' if cfg.get('ollama_auto') and is_local_endpoint(cfg.get('llm_url','')) else cfg.get('llm_model',''),
+               'ask':cfg.get('ask_llm_model','')}
+        for key,text in values.items():
+            widget=self.config_labels[key]
+            widget.setText(widget.fontMetrics().elidedText(compact[key],Qt.ElideRight,max(80,widget.width())))
+            widget.setToolTip(text);widget.setAccessibleName(text)
+            self.config_icons[key].setPixmap(provider_icon(icons[key],18).pixmap(18,18))
+
+    def enable_saved_service_checks(self):
+        self._checks_enabled=True;self.check_saved_services()
+
+    def check_saved_services(self):
+        if not self._checks_enabled:return
+        self._availability_generation+=1;generation=self._availability_generation
+        cfg=deepcopy(self.store.config)
+        for kind,dot in self.config_dots.items():
+            if kind!='asr' or not self._runtime_asr_ready:dot.set_state('pending','Checking saved configuration…')
+        def work():
+            from .service_availability import probe
+            for kind in ('asr','llm','ask'):
+                state,detail=probe(kind,cfg)
+                try:self.availability_ready.emit((generation,kind,state,detail))
+                except RuntimeError:return
+        profile_thread(target=work,name='murmur-availability',daemon=True).start()
+
+    def apply_availability(self,payload):
+        generation,kind,state,detail=payload
+        if generation!=self._availability_generation:return
+        if kind=='asr' and self._runtime_asr_ready:return
+        self.config_dots[kind].set_state(state,detail)
+        from .console import event
+        event('services','%s availability: %s',kind,state,level='WARNING' if state in ('warning','error') else 'INFO')
+
+    def set_speech_readiness(self,ready):
+        self._runtime_asr_ready=bool(ready)
+        self.config_dots['asr'].set_state('active' if ready else 'error','Speech recognizer loaded and ready' if ready else 'Speech setup failed · open Settings')
+
+    def request_release_check(self):
+        if self._release_busy:return
+        if self._release_result is not None and time.monotonic()-self._release_checked_at<900 and self._release_result.state!='error':
+            return
+        self._release_busy=True;self.release_check_button.setEnabled(False)
+        self.release_status.setText('Checking GitHub…')
+        def work():
+            from .release_check import check_releases
+            result=check_releases(__version__)
+            try:self.release_ready.emit(result)
+            except RuntimeError:pass
+        profile_thread(target=work,name='murmur-release-check',daemon=True).start()
+
+    def apply_release_result(self,result):
+        self._release_busy=False;self._release_result=result;self._release_checked_at=time.monotonic()
+        self.release_check_button.setEnabled(True)
+        text={'empty':'No stable Release yet','error':'Check failed · Retry','update':result.latest+' available',
+              'current':'Up to date','ahead':'Local build ahead','unknown':'Latest · '+result.latest}.get(result.state,result.message)
+        self.release_status.setText(text)
+        self.release_status.setAccessibleName(result.message)
+        self.release_status.setToolTip(result.message+'\nStable 0.x only; 0.0.x, drafts and prereleases are excluded. Checks are cached for 15 minutes.')
+        self.release_status.setStyleSheet('font-size:12px;color:'+('#c7b8fa' if result.state=='update' else '#a9cbb8' if result.state=='current' else '#a4a4ae')+';')
+
+    def open_release_page(self):
+        from .release_check import RELEASES_URL
+        QDesktopServices.openUrl(QUrl(self._release_result.url if self._release_result else RELEASES_URL))
 
     def open_shortcut_settings(self):
         self.navigate(3)
@@ -526,7 +443,7 @@ class MainWindow(SettingsForm):
         self.ask_button.setEnabled((can_start and not self.service_test_busy['ask']) or ask_active)
         self.ask_button.setToolTip('Right Alt finishes Ask Anything. Esc cancels.' if ask_active else 'Ask by voice. Use Right Alt + Space in another app for selection context and automatic writing.')
         if idle:
-            status = 'Checking speech recognition…' if checking_asr else 'Demo mode · Sample output stays in preview. No API requests.' if self.store.config['demo'] else 'Buttons open a preview · Use a shortcut in another app to insert safely.'
+            status = 'Checking speech recognition…' if checking_asr else ''
         elif recording:
             status = ('Starting recording' if normalized == 'startup' else 'Recording') + ' · Click Stop recording to finish. Esc cancels.'
             if mode == '随便问':
@@ -571,29 +488,13 @@ class MainWindow(SettingsForm):
 
     def show_token_insights(self):
         if not hasattr(self, 'token_dialog'):
-            self.token_dialog = QDialog(self)
-            self.token_dialog.setWindowTitle('MurMur · Token usage')
-            self.token_dialog.setWindowIcon(icon())
-            self.token_dialog.setFixedSize(420, 330)
-            self.token_dialog.setWindowFlag(Qt.MSWindowsFixedSizeDialogHint, True)
-            self.token_dialog.setModal(False)
-            layout = QVBoxLayout(self.token_dialog)
-            layout.setContentsMargins(18, 16, 18, 16)
-            layout.setSpacing(10)
-            layout.addWidget(label('Token usage', 'title'))
-            form = QFormLayout()
-            form.setVerticalSpacing(7)
-            self.token_values = {}
-            for key, title in [('local_tokens', 'Local tokens'), ('external_tokens', 'External tokens'), ('external_cost_usd', 'Known external cost (USD)'), ('requests', 'Requests'), ('estimated_tokens', 'Estimated tokens'), ('unpriced_calls', 'Unpriced calls'), ('missing_usage_calls', 'Requests without usage')]:
-                value = label('Not available')
-                self.token_values[key] = value
-                form.addRow(title, value)
-            layout.addLayout(form)
-            self.token_notice = label('Token counts may include estimates. Unpriced calls are listed separately.', 'muted')
-            self.token_notice.setStyleSheet('font-size:11px;')
-            layout.addWidget(self.token_notice)
+            from .token_panel import create_token_panel
+            self.token_dialog=create_token_panel(self)
         self.refresh_token_insights()
+        entering=not self.token_dialog.isVisible()
+        if entering:self.token_dialog.setWindowOpacity(.86)
         self.token_dialog.show()
+        if entering:self.token_dialog.appear.stop();self.token_dialog.appear.start()
         dark_titlebar(self.token_dialog)
         self.token_dialog.raise_()
         self.token_dialog.activateWindow()
@@ -622,6 +523,7 @@ class MainWindow(SettingsForm):
         for key, widget in self.token_values.items():
             value = totals.get(key)
             widget.setText('Not available' if value is None else f'${float(value):.6f}' if key == 'external_cost_usd' else f'{int(value):,}')
+        self.token_split.set_counts(int(totals.get('local_tokens',0)),int(totals.get('external_tokens',0)))
         since = totals.get('tracked_since')
         tracked = 'Tracked since ' + str(since).split('T')[0] if since else 'Usage tracked from this version'
         self.token_notice.setText(tracked + ' · Requests without usage are excluded. Cost excludes unpriced calls.')
@@ -680,12 +582,16 @@ class MainWindow(SettingsForm):
 
     def history(self):
         layout = self.page('History')
+        from .window_chrome import ScrollToTop
+        self.history_top_button=ScrollToTop(self.stack.widget(1))
         row = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search your sessions')
         self.search.addAction(line_icon('search', 14), QLineEdit.LeadingPosition)
         self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self.reset_history_filters)
+        self._search_delay=QTimer(self);self._search_delay.setSingleShot(True);self._search_delay.setInterval(180)
+        self._search_delay.timeout.connect(self.reset_history_filters)
+        self.search.textChanged.connect(lambda *_:self._search_delay.start())
         row.addWidget(self.search, 1)
         self.history_mode = CompactComboBox()
         for text, data in [('All sessions', 'all'), ('Dictation', '听写'), ('Translation', '翻译'), ('Text edits', 'edits'), ('Ask Anything', 'ask'), ('Voice edits', '语音编辑'), ('Questions', '问答'), ('Drafts', '起草')]:
@@ -698,28 +604,40 @@ class MainWindow(SettingsForm):
         row.addWidget(export)
         layout.addLayout(row)
         self.filter_label = label('', 'muted')
-        self.filter_label.setStyleSheet('font-size:11px;')
+        self.filter_label.setStyleSheet('font-size:12px;')
         layout.addWidget(self.filter_label)
         self.history_status = label('', 'muted')
-        self.history_status.setStyleSheet('font-size:11px;')
+        self.history_status.setStyleSheet('font-size:12px;')
         self.history_status.hide()
         layout.addWidget(self.history_status)
         self._history_feedback = QTimer(self)
         self._history_feedback.setSingleShot(True)
         self._history_feedback.timeout.connect(self.history_status.hide)
+        self._history_render_timer=QTimer(self);self._history_render_timer.setSingleShot(True)
+        self._history_render_timer.setInterval(12);self._history_render_timer.timeout.connect(self.append_history_batch)
+        self._history_pending=[]
+        self._history_total=0
+        scroll=self.stack.widget(1)
+        scroll.verticalScrollBar().valueChanged.connect(self.schedule_history_fill)
         self.history_body = QVBoxLayout()
         self.history_body.setSpacing(9)
         layout.addLayout(self.history_body)
         layout.addStretch()
 
     def reset_history_filters(self, *args):
-        self.history_limit = 60
-        self.refresh()
+        self.history_limit = 0
+        self.build_history()
 
     def filter_day(self, day):
-        self.day_filter = day
-        self.history_limit = 60
-        self.navigate(1)
+        self.calendar.selected_day=date.fromisoformat(day)
+        self.refresh_day_summary();self.calendar.update()
+
+    def refresh_day_summary(self):
+        day=self.calendar.selected_day
+        rows=[r for r in self.store.rows() if r['time'][:10]==day.isoformat() and bool(r['demo'])==bool(self.stats_source.currentData())]
+        data=insights(rows)
+        self.day_summary_title.setText(human_date(day))
+        self.day_summary.setText(f"{data['uses']} sessions  ·  {compact_count(data['characters'])} characters  ·  {duration_text(data['duration'])}  ·  {round(data['speed'])} / min")
 
     @staticmethod
     def clear_layout(layout):
@@ -734,64 +652,27 @@ class MainWindow(SettingsForm):
                 MainWindow.clear_layout(item.layout())
 
     def build_history(self):
+        signature=(self.store.db.total_changes,self.search.text(),self.day_filter,self.history_mode.currentData())
+        if getattr(self,'_history_signature',None)==signature:
+            self.schedule_history_fill()
+            return
+        self._history_render_timer.stop()
+        self._history_signature=signature
+        self._history_more_button=None
         self.history_record_button = None
         self.clear_layout(self.history_body)
         if getattr(self.store,'cleanup_warning',''):
             self.history_feedback(self.store.cleanup_warning)
         mode = self.history_mode.currentData()
-        rows = [r for r in self.store.rows(self.search.text()) if (not self.day_filter or r['time'][:10] == self.day_filter) and (mode == 'all' or r['mode'] == mode or mode == 'ask' and r['mode'] in ASK_MODES or mode == 'edits' and r['mode'] not in {'听写', '翻译', *ASK_MODES})]
-        self.current_rows = rows
-        self.filter_label.setText(f'{human_date(self.day_filter) if self.day_filter else "All dates"} · {len(rows)} session' + ('' if len(rows) == 1 else 's'))
+        filters=(self.search.text(),self.day_filter,mode)
+        self._history_total=self.store.history_slice(*filters,count=True)
+        self.current_rows=[];self.history_limit=0
+        self.filter_label.setText(f'{human_date(self.day_filter) if self.day_filter else "All dates"} · {self._history_total} session' + ('' if self._history_total == 1 else 's'))
         if self.day_filter:
             self.history_body.addWidget(button('Clear date filter', self.clear_day), alignment=Qt.AlignLeft)
-        previous = ''
-        for r in rows[:self.history_limit]:
-            day = r['time'][:10]
-            if day != previous:
-                group_label = label(human_date(day), 'muted')
-                group_label.setStyleSheet('font-size:11px;padding-top:4px;')
-                self.history_body.addWidget(group_label)
-                previous = day
-            frame, body = card()
-            body.setContentsMargins(13, 9, 10, 12)
-            head = QHBoxLayout()
-            meta = label(r['time'][11:16] + ' · ' + MODE_NAMES.get(r['mode'], r['mode']) + (' · Demo' if r['demo'] else ''), 'muted')
-            meta.setStyleSheet('font-size:11px;')
-            meta.setWordWrap(False)
-            head.addWidget(meta, 1)
-            copy_text = r['final'] or r['raw']
-            copy = icon_button('copy', 'Copy text', lambda checked=False, text=copy_text: self.copy_history_text(text))
-            copy.setEnabled(bool(copy_text.strip()))
-            if not copy.isEnabled():copy.setToolTip('No transcript to copy')
-            head.addWidget(copy)
-            more = icon_button('more', 'Session options')
-            menu = QMenu(more)
-            menu.addAction('Open session', lambda row=r: self.show_record(row))
-            menu.addAction('Delete session', lambda row=r: self.remove_record(row))
-            more.setMenu(menu)
-            more.setPopupMode(QToolButton.InstantPopup)
-            head.addWidget(more)
-            body.addLayout(head)
-            text = r['final'] or r['raw'] or 'No transcript was captured.'
-            excerpt = label(text[:420] + (' …' if len(text) > 420 else ''))
-            excerpt.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            excerpt.setMinimumWidth(0)
-            excerpt.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            body.addWidget(excerpt)
-            comparison = bool(r['raw'].strip() and r['final'].strip() and r['raw'] != r['final'])
-            if comparison or len(text) > 420:
-                full = button('Compare original and result' if comparison else 'View full text', lambda checked=False, row=r: self.show_record(row))
-                full.setObjectName('history_compare' if comparison else 'history_full_text')
-                full.setStyleSheet('QPushButton{background:transparent;border:1px solid transparent;color:#b9aafa;padding:2px 0;min-height:16px;}QPushButton:hover{color:#eee6ff;}QPushButton:focus{border-color:#b9aafa;}')
-                full.setToolTip('Open the saved original text and processed result.' if comparison else 'Open the full result and original transcript.')
-                full.setAccessibleName(('Compare original and result for session at ' if comparison else 'View full text for session at ')+r['time'])
-                body.addWidget(full, alignment=Qt.AlignLeft)
-            if r['error']:
-                error = label(r['error'], 'muted')
-                error.setStyleSheet('font-size:11px;')
-                body.addWidget(error)
-            self.history_body.addWidget(frame)
-        if not rows:
+        self._history_last_day=''
+        self._history_pending=[]
+        if not self._history_total:
             frame, body = card()
             body.addWidget(label('No matching sessions.' if self.search.text() or self.day_filter or mode != 'all' else 'Your next idea starts here.'))
             body.addWidget(label('Try another search or clear your filters.' if self.search.text() or self.day_filter or mode != 'all' else 'Use the button below or your dictation shortcut. Your transcripts will appear here.', 'muted'))
@@ -801,13 +682,77 @@ class MainWindow(SettingsForm):
                 body.addWidget(record, alignment=Qt.AlignLeft)
                 self.history_record_button = record
             self.history_body.addWidget(frame)
-        if len(rows) > self.history_limit:
-            self.history_body.addWidget(button(f'Load more · {len(rows) - self.history_limit} remaining', self.load_more_history), alignment=Qt.AlignCenter)
+        self.append_history_batch()
         self.set_session_state(self._session_phase, self._session_mode)
 
+    def schedule_history_fill(self,*args):
+        if self.stack.currentIndex()==1 and len(self.current_rows)<self._history_total:
+            self._history_render_timer.start()
+
+    def append_history_batch(self):
+        # Only materialize enough full-text cards to fill the current viewport.
+        # A tiny lookahead makes the next card available as scrolling begins.
+        if self.stack.currentIndex()!=1 or len(self.current_rows)>=self._history_total:return
+        scroll=self.stack.widget(1);bar=scroll.verticalScrollBar()
+        if self.current_rows and bar.maximum()-bar.value()>32:return
+        rows=self.store.history_slice(self.search.text(),self.day_filter,self.history_mode.currentData(),limit=1,offset=len(self.current_rows))
+        if not rows:return
+        self.current_rows.extend(rows);self.history_limit=len(self.current_rows)
+        self.append_history_row(rows[0])
+        scroll.widget().layout().activate()
+        self.schedule_history_fill()
+
+    def append_history_row(self,r):
+        day = r['time'][:10]
+        if day != self._history_last_day:
+            group_label = label(human_date(day), 'muted')
+            group_label.setStyleSheet('font-size:12px;padding-top:4px;')
+            self.history_body.addWidget(group_label)
+            self._history_last_day = day
+        frame, body = card()
+        body.setContentsMargins(13, 9, 10, 12)
+        head = QHBoxLayout()
+        meta = label(r['time'][11:16] + ' · ' + MODE_NAMES.get(r['mode'], r['mode']) + (' · Demo' if r['demo'] else ''), 'muted')
+        meta.setStyleSheet('font-size:12px;')
+        meta.setWordWrap(False)
+        head.addWidget(meta, 1)
+        copy_text = r['final'] or r['raw']
+        copy = icon_button('copy', 'Copy text', lambda checked=False, text=copy_text: self.copy_history_text(text))
+        copy.setEnabled(bool(copy_text.strip()))
+        if not copy.isEnabled():copy.setToolTip('No transcript to copy')
+        head.addWidget(copy)
+        more = icon_button('more', 'Session options')
+        menu = QMenu(more)
+        menu.addAction('Open session', lambda row=r: self.show_record(row))
+        menu.addAction('Delete session', lambda row=r: self.remove_record(row))
+        more.setMenu(menu)
+        more.setPopupMode(QToolButton.InstantPopup)
+        head.addWidget(more)
+        body.addLayout(head)
+        text = r['final'] or r['raw'] or 'No transcript was captured.'
+        excerpt = label(text)
+        excerpt.setTextFormat(Qt.PlainText)
+        excerpt.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        excerpt.setMinimumWidth(0)
+        excerpt.setWordWrap(True)
+        excerpt.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        body.addWidget(excerpt)
+        comparison = bool(r['raw'].strip() and r['final'].strip() and r['raw'] != r['final'])
+        if comparison or len(text) > 100 or text.count('\n')>=2:
+            full = button('Compare original and result' if comparison else 'View full text', lambda checked=False, row=r: self.show_record(row))
+            full.setObjectName('history_compare' if comparison else 'history_full_text')
+            full.setStyleSheet('QPushButton{background:transparent;border:1px solid transparent;color:#b9aafa;padding:2px 0;min-height:16px;}QPushButton:hover{color:#eee6ff;}QPushButton:focus{border-color:#b9aafa;}')
+            full.setToolTip('Open the saved original text and processed result.' if comparison else 'Open the full result and original transcript.')
+            full.setAccessibleName(('Compare original and result for session at ' if comparison else 'View full text for session at ')+r['time'])
+            body.addWidget(full, alignment=Qt.AlignLeft)
+        if r['error']:
+            error = label(r['error'], 'muted')
+            error.setStyleSheet('font-size:12px;')
+            body.addWidget(error)
+        self.history_body.addWidget(frame)
+
     def load_more_history(self):
-        self.history_limit += 60
-        self.build_history()
+        self.schedule_history_fill()
 
     def clear_day(self):
         self.day_filter = ''
@@ -864,6 +809,7 @@ class MainWindow(SettingsForm):
         destination = Path(path)
         temporary = None
         try:
+            rows=self.store.history_slice(self.search.text(),self.day_filter,self.history_mode.currentData()) if hasattr(self,'store') else self.current_rows
             is_csv = path.lower().endswith('.csv')
             # Keep the previous export intact until the entire new file is
             # written and closed. The same directory permits atomic replace.
@@ -872,12 +818,12 @@ class MainWindow(SettingsForm):
                                              prefix=f'.{destination.name}.', suffix='.tmp', delete=False) as f:
                 temporary = Path(f.name)
                 if is_csv:
-                    fields = list(self.current_rows[0]) if self.current_rows else ['time', 'mode', 'raw', 'final', 'context']
+                    fields = list(rows[0]) if rows else ['time', 'mode', 'raw', 'final', 'context']
                     writer = csv.DictWriter(f, fieldnames=fields)
                     writer.writeheader()
-                    writer.writerows(self.current_rows)
+                    writer.writerows(rows)
                 else:
-                    json.dump(self.current_rows, f, ensure_ascii=False, indent=2)
+                    json.dump(rows, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temporary, destination)
@@ -919,13 +865,13 @@ class MainWindow(SettingsForm):
         actions.addStretch()
         layout.addLayout(actions)
         self.analysis_status = label('Local rules find recurring terms in your history. Review suggestions before adding; demo sessions are excluded.', 'muted')
-        self.analysis_status.setStyleSheet('font-size:11px;')
+        self.analysis_status.setStyleSheet('font-size:12px;')
         layout.addWidget(self.analysis_status)
         self.vocabulary_notice = label('', 'muted')
-        self.vocabulary_notice.setStyleSheet('font-size:11px;')
+        self.vocabulary_notice.setStyleSheet('font-size:12px;')
         layout.addWidget(self.vocabulary_notice)
         self.dictionary_status = label('', 'muted')
-        self.dictionary_status.setStyleSheet('font-size:11px;')
+        self.dictionary_status.setStyleSheet('font-size:12px;')
         self.dictionary_status.hide()
         layout.addWidget(self.dictionary_status)
         self.suggestions_body = QVBoxLayout()
@@ -1036,7 +982,7 @@ class MainWindow(SettingsForm):
                 self.analysis_ready.emit((version, analyze_vocabulary(rows, existing)), f'Analyzed {len(rows)} voice sessions')
             except Exception:
                 self.analysis_ready.emit((version, []), 'Analysis failed. Please try again.')
-        threading.Thread(target=work, daemon=True).start()
+        profile_thread(target=work, daemon=True).start()
 
     def show_analysis(self, payload, status):
         version, candidates = payload
@@ -1051,7 +997,7 @@ class MainWindow(SettingsForm):
             row = QHBoxLayout()
             row.addWidget(label(candidate['word']), 1)
             frequency = label(f'{candidate["count"]} mentions · {candidate["sessions"]} sessions', 'muted')
-            frequency.setStyleSheet('font-size:11px;')
+            frequency.setStyleSheet('font-size:12px;')
             row.addWidget(frequency)
             add = button('Add')
             add.clicked.connect(lambda checked=False, c=candidate, b=add: self.accept_word(c, b))
@@ -1130,7 +1076,7 @@ class MainWindow(SettingsForm):
         test = button('Test connection', lambda: self.request_service_test(kind))
         test.setToolTip('Test these settings without saving changes. This may send a small request to the selected service.')
         status = label('Not checked', 'muted')
-        status.setStyleSheet('font-size:11px;')
+        status.setStyleSheet('font-size:12px;')
         status.setWordWrap(True)
         status.setMinimumWidth(0)
         status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1195,7 +1141,7 @@ class MainWindow(SettingsForm):
             test.setText(('Checking' if busy else 'Test') if test.property('overviewTest') else 'Checking…' if busy else 'Load && test' if local_asr else 'Test connection')
             status.setText(summary)
             status.setToolTip(summary + ('\n' + detail if detail else ''))
-            status.setStyleSheet(f'font-size:11px;color:{color};')
+            status.setStyleSheet(f'font-size:12px;color:{color};')
             details.setEnabled(bool(detail))
         dialog = self.service_test_dialogs.get(kind)
         if dialog:
@@ -1236,7 +1182,7 @@ class MainWindow(SettingsForm):
             note = ModelLabel()
             note.setText('Uses the values currently shown in Settings.')
             note.setObjectName('muted')
-            note.setStyleSheet('font-size:11px;color:#a7a2b1;')
+            note.setStyleSheet('font-size:12px;color:#a7a2b1;')
             layout.addWidget(note)
             dialog.test_context = note
             dialog.test_detail = QPlainTextEdit()
@@ -1527,6 +1473,8 @@ class MainWindow(SettingsForm):
         text_model = ('Auto → ' + name if name else 'Auto · test to identify model') if automatic else name or 'Model not specified'
         if metadata.get('response_model') and metadata['response_model'] != name:
             text_model += ' → ' + metadata['response_model']
+        from .service_identity import model_source_label
+        text_model = model_source_label(self.fields['llm_url'].text())+' · '+text_model
         text_model += ' · ' + ('local' if local else 'online')
         if metadata.get('parameter_size') and metadata['parameter_size'].lower() not in text_model.lower():
             text_model += ' · ' + metadata['parameter_size'] + ' model tag'
@@ -1537,6 +1485,7 @@ class MainWindow(SettingsForm):
         ask_model = self.fields['ask_llm_model'].text().strip() or 'Model not specified'
         if ask_metadata.get('response_model') and ask_metadata['response_model'] != ask_model:
             ask_model += ' → ' + ask_metadata['response_model']
+        ask_model = model_source_label(self.fields['ask_llm_url'].text())+' · '+ask_model
         ask_model += ' · ' + ('local' if is_local_endpoint(self.fields['ask_llm_url'].text()) else 'online')
         self.service_overview_models['ask'].setText(ask_model)
         self.service_overview_models['ask'].setToolTip(ask_model + '\nIndependent model for Ask Anything.')
@@ -1548,7 +1497,7 @@ class MainWindow(SettingsForm):
             status.setToolTip(summary + ('\n' + detail if detail else ''))
             outcome = self.service_test_success.get(kind)
             color = '#a4a4ae' if outcome is None else '#a9cbb8' if outcome else '#dfa6ae'
-            status.setStyleSheet(f'font-size:11px;color:{color};')
+            status.setStyleSheet(f'font-size:12px;color:{color};')
             progress = self.service_overview_progress[kind]
             downloading=kind=='asr' and provider=='offline' and self._offline_download_busy
             download_status=self.offline_status.text() if kind=='asr' and provider=='offline' else ''
@@ -1556,7 +1505,7 @@ class MainWindow(SettingsForm):
             if downloading or terminal and not getattr(self, '_offline_download_test_superseded', False):
                 status.setText(download_status)
                 status.setToolTip(download_status)
-                status.setStyleSheet('font-size:11px;color:'+('#dfa6ae;' if download_status.startswith('Download failed.') else '#a9cbb8;' if download_status.startswith('Model files downloaded') else '#a4a4ae;'))
+                status.setStyleSheet('font-size:12px;color:'+('#dfa6ae;' if download_status.startswith('Download failed.') else '#a9cbb8;' if download_status.startswith('Model files downloaded') else '#a4a4ae;'))
             progress.setText('Installing…' if downloading else 'Checking…')
             progress.setVisible(downloading or self.service_test_busy[kind])
             for _test,_label,details in self.service_test_controls[kind]:
@@ -1651,6 +1600,7 @@ class MainWindow(SettingsForm):
         self.update_credential_status()
         self.refresh_token_insights()
         self.refresh_shortcuts()
+        self.refresh_configuration()
         demo = self.store.config['demo']
         self.badge.setText('Demo mode' if demo else 'Offline ASR' if self.store.config.get('asr_backend') == 'offline' else 'Online ASR')
         if not demo and self.store.config.get('asr_backend') == 'offline':
@@ -1660,7 +1610,7 @@ class MainWindow(SettingsForm):
             self.badge.setToolTip('Demo uses sample text.' if demo else 'Speech recognition uses your selected online provider.')
         selected = [r for r in self.store.rows() if bool(r['demo']) == bool(self.stats_source.currentData())]
         data = insights(selected)
-        values = [f'{data["characters"]:,}', duration_text(data['duration']), f'{data["speed"]:.0f} / min', f'{data["uses"]:,}']
+        values = [compact_count(data['characters']), duration_text(data['duration']), compact_count(round(data['speed']))+' / min', compact_count(data['uses'])]
         for w, value in zip(self.metric_values, values):
             w.setText(value)
         active_unit = 'day' if data['active'] == 1 else 'days'
@@ -1668,7 +1618,14 @@ class MainWindow(SettingsForm):
         self.activity_metrics.setText(f'{data["active"]} active {active_unit} · {data["streak"]} day streak · Best {data["longest"]} {best_unit}')
         for widget, key in zip(self.activity_values, ('active', 'streak', 'longest')):
             widget.setText(str(data[key]))
-        self.calendar.set_data(data['daily'])
+        grouped=defaultdict(list)
+        for row in selected:grouped[date.fromisoformat(row['time'][:10])].append(row)
+        summaries={}
+        for day,rows in grouped.items():
+            total=insights(rows)
+            summaries[day]=f"{total['uses']} sessions · {compact_count(total['characters'])} characters\n{duration_text(total['duration'])} · {round(total['speed'])} / min"
+        self.calendar.set_data(data['daily'],summaries)
+        self.refresh_day_summary()
         self.set_session_state(self._session_phase, self._session_mode)
         if self.stack.currentIndex() == 1:
             self.build_history()

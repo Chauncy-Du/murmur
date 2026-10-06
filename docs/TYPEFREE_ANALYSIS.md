@@ -289,4 +289,7 @@ OpenAI/Groq：接口已实现，真实调用未验证。离线模型：安装交
 所有 TypeFree 链接固定在上述 commit，报告不使用 floating main 作为版本证据。官方 ASR 文档是本轮接口参数依据；上游 README 与旧5.6.0审计的性能/成功声明未在本机复测。TypeFree [MIT LICENSE](https://github.com/Charlo-O/typefree/blob/c6b0c769b897ebc49efcb48e2850d4b94c483d74/LICENSE) 的版权保留与本轮算法适配声明随源代码交付。
 
 
-当前源码版本为 0.4.6；本文为此前参考拆解记录，最新改动和验证范围见 [RELEASE_0.4.6.md](RELEASE_0.4.6.md)。
+当前源码版本为 0.4.7；本文为此前参考拆解记录，最新改动和验证范围见 [RELEASE_0.4.7.md](RELEASE_0.4.7.md)。
+
+
+当前源码版本为 0.4.7；本文为此前参考拆解记录，最新改动和验证范围见 [RELEASE_0.4.7.md](RELEASE_0.4.7.md)。

@@ -301,7 +301,7 @@ def test_local_usage_console_and_home_show_actual_counts_without_content(control
     usage=dict(request_id='local-console',local=True,model='fixture-model',input_tokens=10,output_tokens=3,total_tokens=13,cost_usd=0,prompt='PRIVATE_CONTENT')
     c.record_usage(usage);c.record_usage(usage)
     output=capsys.readouterr().out
-    assert output.count('[MurMur] Local LLM')==1
+    assert output.count('Local LLM')==1 and '[info]' in output and 'usage' in output
     assert 'input=10 output=3 total=13' in output and 'cumulative local tokens=13' in output
     assert 'PRIVATE_CONTENT' not in output
     assert c.window.home_local_tokens.text()=='13'

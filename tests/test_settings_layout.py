@@ -49,7 +49,8 @@ def test_categories_and_field_snapshot_are_complete(window):
         'bubble_enter_motion','bubble_exit_motion','bubble_state_motion','bubble_wave_motion','bubble_wave_style','bubble_motion_duration',
         'save_audio', 'style', 'rules', 'ask_key', 'ask_llm_url', 'ask_llm_model', 'offline_acceleration',
         'asr_http_url','asr_http_model','asr_http_language','asr_http_timeout',
-        'audio_quality_enabled','audio_noise_gate','audio_lead_padding_ms','audio_tail_padding_ms',
+            'audio_quality_enabled','audio_noise_gate','audio_lead_padding_ms','audio_tail_padding_ms',
+            'audio_warm_enabled','audio_preroll_ms',
     }
     assert set(window.fields) == expected
     values, secrets = window._settings_snapshot()
